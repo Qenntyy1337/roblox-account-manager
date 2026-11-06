@@ -191,17 +191,18 @@ fn tick(app: &tauri::AppHandle) {
                 .map(|(k, t)| (k.clone(), t.clone()))
                 .collect();
             for (id, t) in pending {
-                changed = true;
-                snapshot.push(InstanceDto {
-                    account_id: id,
-                    pid: 0,
-                    status: "launching".into(),
-                    started_at: t.started_at,
-                    title: None,
-                    mode: Some(t.mode),
-                    playtime_secs: saved_playtime.get(&id).copied().unwrap_or(0),
-                });
-            }
+				changed = true;
+				let saved = saved_playtime.get(&id).copied().unwrap_or(0);  // ← сначала borrow
+				snapshot.push(InstanceDto {
+					account_id: id,        // ← теперь move в конце, всё легально
+					pid: 0,
+					status: "launching".into(),
+					started_at: t.started_at,
+					title: None,
+					mode: Some(t.mode),
+					playtime_secs: saved,
+				});
+			}
         }
     }
 
