@@ -107,6 +107,22 @@ export function AccountCard({
 
       <div className="flex items-center gap-2">
         <StatusChip status={status} />
+        {inst?.mode === "autologin" && (
+          <span
+            className="inline-flex items-center gap-1 rounded-full border border-accent/40 px-2.5 py-1 text-[11px] font-medium text-accent"
+            title={t("accounts.autoBadgeHint")}
+          >
+            {t("accounts.autoBadge")}
+          </span>
+        )}
+        {inst && inst.mode === "plain" && (
+          <span
+            className="inline-flex items-center gap-1 rounded-full border border-line px-2.5 py-1 text-[11px] font-medium text-faint"
+            title={t("accounts.plainBadgeHint")}
+          >
+            {t("accounts.plainBadge")}
+          </span>
+        )}
         <span
           className={cn(
             "inline-flex items-center gap-1.5 rounded-full border border-line px-2.5 py-1 text-[11px]",

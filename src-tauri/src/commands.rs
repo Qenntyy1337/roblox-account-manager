@@ -387,6 +387,11 @@ pub async fn launch_account(
 
         match ticket {
             Ok(ticket) => {
+                // КРИТИЧНО: закрыть хэндлы ДО открытия протокола,
+                // иначе новый процесс убьёт старый клиент сигналом.
+                if close_single {
+                    close_singletons_pre(&app, &username).await;
+                }
                 let url = roblox::player_protocol_url(&ticket);
                 match winproc::open_protocol(&url) {
                     Ok(()) => {
@@ -402,6 +407,7 @@ pub async fn launch_account(
                                     status: "launching".into(),
                                     started_at: now,
                                     last_title: None,
+                                    mode: "autologin".into(),
                                     acc_secs: 0,
                                     last_tick_ms: now,
                                     ticks: 0,
@@ -452,6 +458,12 @@ pub async fn launch_account(
     }
 
     /* ---------- Обычный запуск: напрямую RobloxPlayerBeta.exe ---------- */
+    // Закрыть синглтон-хэндлы ДО запуска, иначе новый клиент
+    // просигналит ROBLOX_singletonEvent и старый Roblox закроется.
+    if close_single {
+        close_singletons_pre(&app, &username).await;
+    }
+
     let data_dir = state.data_dir.clone();
     let id2 = id.clone();
     let pid = tauri::async_runtime::spawn_blocking(move || -> Result<u32, String> {
@@ -477,6 +489,7 @@ pub async fn launch_account(
                 status: "launching".into(),
                 started_at: now,
                 last_title: None,
+                mode: "plain".into(),
                 acc_secs: 0,
                 last_tick_ms: now,
                 ticks: 0,
@@ -499,8 +512,60 @@ pub async fn launch_account(
     Ok(LaunchDto { pid, mode: "plain".into() })
 }
 
+/// Синхронное закрытие синглтон-хэндлов ДО запуска нового клиента.
+/// Vanilla Roblox при старте «сигналит» событие ROBLOX_singletonEvent,
+/// и старый клиент закрывается. Если разрушить объект заранее (закрыв
+/// все его хэндлы), новому клиенту некого сигналить — оба продолжат
+/// работать. Это и есть обход одиночного режима (multi-instance).
+async fn close_singletons_pre(app: &AppHandle, username: &str) {
+    let app2 = app.clone();
+    let username2 = username.to_string();
+    let closed = tauri::async_runtime::spawn_blocking(move || -> usize {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+        let mut total = 0usize;
+        loop {
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            let mut round = 0usize;
+            for pid in winproc::roblox_pids() {
+                if !winproc::is_alive(pid) {
+                    continue;
+                }
+                let n = winproc::close_singleton_handles(pid);
+                if n > 0 {
+                    round += n;
+                    log_event(
+                        &app2,
+                        "success",
+                        Some(&username2),
+                        &format!("Closed {n} Roblox singleton handle(s) (pid {pid})"),
+                    );
+                }
+            }
+            total += round;
+            if round == 0 {
+                break; // хэндлов больше нет — путь свободен
+            }
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        }
+        total
+    })
+    .await
+    .unwrap_or(0);
+
+    if closed > 0 {
+        log_event(
+            app,
+            "success",
+            Some(username),
+            &format!("Singleton handles cleared before launch ({closed}) — old clients stay alive"),
+        );
+    }
+}
+
 /// Обход синглтон-хэндла: закрываем ROBLOX_single* во всех клиентах
-/// (фоновый поток на 12 с после каждого запуска).
+/// (фоновый поток на 12 с после каждого запуска — страховка).
 fn spawn_close_singletons(app: &AppHandle, username: &str) {
     let app2 = app.clone();
     let username2 = username.to_string();

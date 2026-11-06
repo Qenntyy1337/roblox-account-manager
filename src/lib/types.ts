@@ -32,6 +32,8 @@ export interface InstanceInfo {
   status: InstanceStatus;
   started_at: number;
   title: string | null;
+  /** Как запущен клиент: autologin | plain */
+  mode: string | null;
   /** Суммарная наработка (сохранённая + текущая сессия), секунды */
   playtime_secs: number;
 }

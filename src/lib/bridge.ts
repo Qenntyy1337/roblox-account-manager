@@ -136,6 +136,7 @@ function demoSimulateLaunch(acc: Account, pid: number): void {
     status: "launching",
     started_at: Date.now(),
     title: null,
+    mode: "plain",
     playtime_secs: acc.playtime_secs,
   };
   saveDemo(state);

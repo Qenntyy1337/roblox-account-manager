@@ -128,6 +128,10 @@ const en: Dict = {
   "status.launching": "Launching",
   "status.online": "In menu",
   "status.ingame": "In game",
+  "accounts.autoBadge": "Autologin",
+  "accounts.autoBadgeHint": "Launched with auth ticket — logged into the account",
+  "accounts.plainBadge": "No login",
+  "accounts.plainBadgeHint": "Launched without login (autologin failed or disabled)",
 
   "toast.accountAdded": "Account added",
   "toast.accountUpdated": "Account updated",
@@ -277,6 +281,10 @@ const ru: Dict = {
   "status.launching": "Запуск",
   "status.online": "В меню",
   "status.ingame": "В игре",
+  "accounts.autoBadge": "Автологин",
+  "accounts.autoBadgeHint": "Запущен с auth ticket — сразу вошёл в аккаунт",
+  "accounts.plainBadge": "Без логина",
+  "accounts.plainBadgeHint": "Запущен без входа в аккаунт (автологин не удался или выключен)",
 
   "toast.accountAdded": "Аккаунт добавлен",
   "toast.accountUpdated": "Аккаунт обновлён",
@@ -426,6 +434,10 @@ const uk: Dict = {
   "status.launching": "Запуск",
   "status.online": "У меню",
   "status.ingame": "У грі",
+  "accounts.autoBadge": "Автологін",
+  "accounts.autoBadgeHint": "Запущено з auth ticket — одразу увійшов в акаунт",
+  "accounts.plainBadge": "Без логіна",
+  "accounts.plainBadgeHint": "Запущено без входу в акаунт (автологін не вдався або вимкнений)",
 
   "toast.accountAdded": "Акаунт додано",
   "toast.accountUpdated": "Акаунт оновлено",

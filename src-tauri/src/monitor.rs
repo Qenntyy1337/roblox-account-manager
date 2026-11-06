@@ -15,6 +15,8 @@ pub struct Track {
     pub status: String,
     pub started_at: i64,
     pub last_title: Option<String>,
+    /// Как был запущен клиент: autologin | plain.
+    pub mode: String,
     /// Накопленное за текущую сессию время (сек) с последнего флаша.
     pub acc_secs: u64,
     /// Момент предыдущего тика (unix ms) — для расчёта дельты.
@@ -30,6 +32,8 @@ pub struct InstanceDto {
     pub status: String,
     pub started_at: i64,
     pub title: Option<String>,
+    /// Как запущен клиент: autologin | plain.
+    pub mode: Option<String>,
     /// Суммарная наработка: сохранённая + текущая сессия, сек.
     pub playtime_secs: u64,
 }
@@ -50,6 +54,7 @@ pub fn snapshot(state: &AppState) -> Vec<InstanceDto> {
             status: t.status.clone(),
             started_at: t.started_at,
             title: t.last_title.clone(),
+            mode: Some(t.mode.clone()),
             playtime_secs: saved.get(id).copied().unwrap_or(0) + t.acc_secs,
         })
         .collect()
@@ -150,6 +155,7 @@ fn tick(app: &tauri::AppHandle) {
                             status: "launching".into(),
                             started_at: t.started_at,
                             last_title: None,
+                            mode: t.mode.clone(),
                             acc_secs: t.acc_secs,
                             last_tick_ms: now,
                             ticks: 0,
@@ -192,6 +198,7 @@ fn tick(app: &tauri::AppHandle) {
                                 status: "launching".into(),
                                 started_at: chrono::Utc::now().timestamp_millis(),
                                 last_title: None,
+                                mode: t.mode.clone(),
                                 acc_secs: t.acc_secs,
                                 last_tick_ms: now,
                                 ticks: 0,
@@ -372,6 +379,7 @@ fn tick(app: &tauri::AppHandle) {
             status: t.status,
             started_at: t.started_at,
             title: t.last_title,
+            mode: Some(t.mode),
             playtime_secs: total_secs,
         });
     }
