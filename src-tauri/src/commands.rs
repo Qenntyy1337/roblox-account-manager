@@ -18,6 +18,10 @@ pub struct AppState {
     pub config_path: PathBuf,
     pub config: Mutex<Config>,
     pub instances: Mutex<HashMap<String, Track>>,
+    /// Сериализует запуски: следующий старт начинается только после паузы,
+    /// чтобы предыдущий клиент успел создать свои синглтон-объекты —
+    /// иначе два одновременно стартующих клиента убивают друг друга.
+    pub launch_lock: tauri::async_runtime::Mutex<()>,
 }
 
 /* --------------------------- DTO --------------------------- */
@@ -335,12 +339,36 @@ pub fn delete_account(app: AppHandle, state: State<AppState>, id: String) -> Res
     Ok(())
 }
 
+/// Пауза после открытия клиента (внутри launch-замка): следующий запуск
+/// обязан начаться, когда этот клиент уже создал свои синглтон-объекты —
+/// тогда процедура запуска закроет их заранее и оба клиента выживут.
+async fn spacing_wait() {
+    let _ = tauri::async_runtime::spawn_blocking(|| {
+        std::thread::sleep(std::time::Duration::from_millis(2500));
+    })
+    .await;
+}
+
+/// Краткая диагностика скана для DEBUG-лога.
+fn scan_note(scan: &winproc::SingletonScan) -> String {
+    let mut s = format!(
+        "process open {}, handles {}, event/mutant {}, closed {}",
+        scan.open_ok, scan.in_process, scan.typed, scan.closed
+    );
+    if !scan.names.is_empty() {
+        s.push_str(", names: ");
+        s.push_str(&scan.names.join(" | "));
+    }
+    s
+}
+
 #[tauri::command]
 pub async fn launch_account(
     app: AppHandle,
     state: State<'_, AppState>,
     id: String,
 ) -> Result<LaunchDto, String> {
+    /* ---------- Резерв слота: читаем конфиг ДО вставки ---------- */
     let (path, isolate, close_single, auto_login, username, cookie_ok, cookie_enc) = {
         let cfg = state.config.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let acc = cfg
@@ -364,15 +392,35 @@ pub async fn launch_account(
             acc.cookie_enc.clone(),
         )
     };
+    let intended_mode = if auto_login && cookie_ok { "autologin" } else { "plain" };
 
-    if state
-        .instances
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .contains_key(&id)
+    /* ---------- Антидабл-клик: занимаем слот атомарно ---------- */
     {
-        return Err("Клиент этого аккаунта уже запущен".into());
+        let mut map = state.instances.lock().unwrap_or_else(|e| e.into_inner());
+        if map.contains_key(&id) {
+            return Err("Клиент этого аккаунта уже запущен".into());
+        }
+        let now = now_ms();
+        map.insert(
+            id.clone(),
+            Track {
+                pid: 0,
+                // reserved — слот занят, но реальный запуск ещё не начался:
+                // монитор такие треки игнорирует (не прицепляет процессы)
+                status: "reserved".into(),
+                started_at: now,
+                last_title: None,
+                mode: intended_mode.into(),
+                acc_secs: 0,
+                last_tick_ms: now,
+                ticks: 0,
+                dead_since: None,
+            },
+        );
     }
+
+    /* ---------- Сериализация: один запуск за раз ---------- */
+    let _launch_guard = state.launch_lock.lock().await;
 
     /* ---------- Автологин: auth ticket + протокол roblox-player ---------- */
     if auto_login && cookie_ok {
@@ -411,6 +459,7 @@ pub async fn launch_account(
                                     acc_secs: 0,
                                     last_tick_ms: now,
                                     ticks: 0,
+                                    dead_since: None,
                                 },
                             );
                         }
@@ -425,6 +474,7 @@ pub async fn launch_account(
                         if close_single {
                             spawn_close_singletons(&app, &username);
                         }
+                        spacing_wait().await;
                         return Ok(LaunchDto { pid: 0, mode: "autologin".into() });
                     }
                     Err(err) => {
@@ -466,7 +516,7 @@ pub async fn launch_account(
 
     let data_dir = state.data_dir.clone();
     let id2 = id.clone();
-    let pid = tauri::async_runtime::spawn_blocking(move || -> Result<u32, String> {
+    let spawned = tauri::async_runtime::spawn_blocking(move || -> Result<u32, String> {
         let lad = if isolate {
             let dir = data_dir.join("instances").join(&id2);
             std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -477,7 +527,21 @@ pub async fn launch_account(
         winproc::spawn_roblox(&path, lad.as_deref())
     })
     .await
-    .map_err(|e| e.to_string())??;
+    .map_err(|e| e.to_string())
+    .and_then(|r| r);
+
+    let pid = match spawned {
+        Ok(p) => p,
+        Err(e) => {
+            // Слот резерва не нужен — запуск не удался
+            state
+                .instances
+                .lock()
+                .unwrap_or_else(|e2| e2.into_inner())
+                .remove(&id);
+            return Err(e);
+        }
+    };
 
     {
         let mut map = state.instances.lock().unwrap_or_else(|e| e.into_inner());
@@ -493,6 +557,7 @@ pub async fn launch_account(
                 acc_secs: 0,
                 last_tick_ms: now,
                 ticks: 0,
+                dead_since: None,
             },
         );
     }
@@ -509,6 +574,7 @@ pub async fn launch_account(
         spawn_close_singletons(&app, &username);
     }
 
+    spacing_wait().await;
     Ok(LaunchDto { pid, mode: "plain".into() })
 }
 
@@ -521,33 +587,53 @@ async fn close_singletons_pre(app: &AppHandle, username: &str) {
     let app2 = app.clone();
     let username2 = username.to_string();
     let closed = tauri::async_runtime::spawn_blocking(move || -> usize {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
         let mut total = 0usize;
+        let mut clear_rounds = 0usize;
+        let mut first_round = true;
         loop {
             if std::time::Instant::now() >= deadline {
                 break;
             }
+            let pids = winproc::roblox_pids();
+            if pids.is_empty() {
+                break; // ни одного клиента Roblox — путь свободен
+            }
             let mut round = 0usize;
-            for pid in winproc::roblox_pids() {
+            for pid in pids {
                 if !winproc::is_alive(pid) {
                     continue;
                 }
-                let n = winproc::close_singleton_handles(pid);
-                if n > 0 {
-                    round += n;
+                let scan = winproc::close_singleton_handles(pid);
+                if first_round {
+                    log_event(
+                        &app2,
+                        "debug",
+                        Some(&username2),
+                        &format!("Singleton scan pid {pid}: {}", scan_note(&scan)),
+                    );
+                }
+                if scan.closed > 0 {
+                    round += scan.closed;
                     log_event(
                         &app2,
                         "success",
                         Some(&username2),
-                        &format!("Closed {n} Roblox singleton handle(s) (pid {pid})"),
+                        &format!("Closed {} Roblox singleton handle(s) (pid {pid})", scan.closed),
                     );
                 }
             }
+            first_round = false;
             total += round;
             if round == 0 {
-                break; // хэндлов больше нет — путь свободен
+                clear_rounds += 1;
+                if clear_rounds >= 6 {
+                    break; // ~1.8 с подряд чисто — путь свободен
+                }
+            } else {
+                clear_rounds = 0;
             }
-            std::thread::sleep(std::time::Duration::from_millis(150));
+            std::thread::sleep(std::time::Duration::from_millis(300));
         }
         total
     })
@@ -572,22 +658,32 @@ fn spawn_close_singletons(app: &AppHandle, username: &str) {
     std::thread::spawn(move || {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
         let mut closed_any = false;
+        let mut first_round = true;
         while std::time::Instant::now() < deadline {
             for pid in winproc::roblox_pids() {
                 if !winproc::is_alive(pid) {
                     continue;
                 }
-                let n = winproc::close_singleton_handles(pid);
-                if n > 0 {
+                let scan = winproc::close_singleton_handles(pid);
+                if first_round {
+                    log_event(
+                        &app2,
+                        "debug",
+                        Some(&username2),
+                        &format!("Singleton sweep pid {pid}: {}", scan_note(&scan)),
+                    );
+                }
+                if scan.closed > 0 {
                     closed_any = true;
                     log_event(
                         &app2,
                         "success",
                         Some(&username2),
-                        &format!("Closed {n} Roblox singleton handle(s) (pid {pid})"),
+                        &format!("Closed {} Roblox singleton handle(s) (pid {pid})", scan.closed),
                     );
                 }
             }
+            first_round = false;
             std::thread::sleep(std::time::Duration::from_millis(250));
         }
         if !closed_any {

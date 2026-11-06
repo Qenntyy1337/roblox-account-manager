@@ -23,6 +23,9 @@ pub struct Track {
     pub last_tick_ms: i64,
     /// Тиков с последнего сохранения наработки на диск.
     pub ticks: u32,
+    /// Момент, когда процесс был впервые замечен мёртвым (unix ms).
+    /// Пока < 8 с — ждём самоперезапуск клиента, не удаляя трек.
+    pub dead_since: Option<i64>,
 }
 
 #[derive(Serialize, Clone)]
@@ -107,6 +110,9 @@ fn tick(app: &tauri::AppHandle) {
 
     let mut changed = false;
     let mut snapshot = Vec::new();
+    // PID, назначенные мёртвым трекам в этом тике (чтобы два трека
+    // не забрали один и тот же перезапустившийся процесс).
+    let mut taken_pids: HashSet<u32> = HashSet::new();
 
     /* --- Автологин-треки (pid == 0): глобальное назначение процессов ---
        Раньше каждый трек брал «самый свежий» процесс — при запуске двух
@@ -118,7 +124,9 @@ fn tick(app: &tauri::AppHandle) {
         let mut launching: Vec<(String, Track)> = {
             let map = state.instances.lock().unwrap_or_else(|e| e.into_inner());
             map.iter()
-                .filter(|(_, t)| t.pid == 0)
+                // reserved — слот, занятый запуском до открытия клиента:
+                // игнорируем, иначе прицепим чужой свежий процесс
+                .filter(|(_, t)| t.pid == 0 && t.status == "launching")
                 .map(|(k, t)| (k.clone(), t.clone()))
                 .collect()
         };
@@ -158,6 +166,7 @@ fn tick(app: &tauri::AppHandle) {
                                 acc_secs: t.acc_secs,
                                 last_tick_ms: now,
                                 ticks: 0,
+                                dead_since: None,
                             },
                         );
                         changed = true;
@@ -187,22 +196,22 @@ fn tick(app: &tauri::AppHandle) {
             // Пока клиент не найден — показываем трек как «Запуск» в UI
             let pending: Vec<(String, Track)> = map
                 .iter()
-                .filter(|(_, t)| t.pid == 0)
+                .filter(|(_, t)| t.pid == 0 && t.status == "launching")
                 .map(|(k, t)| (k.clone(), t.clone()))
                 .collect();
             for (id, t) in pending {
-				changed = true;
-				let saved = saved_playtime.get(&id).copied().unwrap_or(0);  // ← сначала borrow
-				snapshot.push(InstanceDto {
-					account_id: id,        // ← теперь move в конце, всё легально
-					pid: 0,
-					status: "launching".into(),
-					started_at: t.started_at,
-					title: None,
-					mode: Some(t.mode),
-					playtime_secs: saved,
-				});
-			}
+                changed = true;
+                let saved = saved_playtime.get(&id).copied().unwrap_or(0);
+                snapshot.push(InstanceDto {
+                    account_id: id,
+                    pid: 0,
+                    status: "launching".into(),
+                    started_at: t.started_at,
+                    title: None,
+                    mode: Some(t.mode),
+                    playtime_secs: saved,
+                });
+            }
         }
     }
 
@@ -221,26 +230,38 @@ fn tick(app: &tauri::AppHandle) {
 
         if !winproc::is_alive(t.pid) {
             // Клиент закрылся. Roblox часто перезапускает сам себя при старте:
-            // подхватываем новый процесс, если он появился сразу после запуска.
-            let young = now - t.started_at < 45_000;
+            // подхватываем новый процесс — самый старый из свежих, родившихся
+            // не раньше нашего клиента (±1.5 с). Раньше требовали «ровно один
+            // свежий процесс» — при перезапуске двух клиентов сразу оба трека
+            // видели два процесса и не подцепляли ни один.
+            let grace = t
+                .dead_since
+                .map(|s| now - s < 8_000)
+                .unwrap_or(false);
+            let young = now - t.started_at < 45_000 || grace;
             if young {
                 let tracked: HashSet<u32> = {
                     let map = state.instances.lock().unwrap_or_else(|e| e.into_inner());
                     map.values().map(|x| x.pid).collect()
                 };
-                let untracked: Vec<u32> = winproc::roblox_pids()
+                let mut fresh: Vec<(u32, i64)> = winproc::roblox_pids()
                     .into_iter()
-                    .filter(|p| !tracked.contains(p) && *p != t.pid)
+                    .filter(|p| !tracked.contains(p) && !taken_pids.contains(p) && *p != t.pid)
                     // только СВЕЖИЕ процессы: клиент перезапустил сам себя,
                     // чтобы не прихватить чужой давно работающий клиент
-                    .filter(|p| {
-                        winproc::process_start_time(*p)
-                            .map(|st| now - st < 15_000)
-                            .unwrap_or(false)
+                    .filter_map(|p| {
+                        winproc::process_start_time(p)
+                            .filter(|st| now - *st < 20_000)
+                            .map(|st| (p, st))
                     })
                     .collect();
-                if untracked.len() == 1 {
-                    let new_pid = untracked[0];
+                fresh.sort_by_key(|&(_, st)| st);
+                let pick = fresh
+                    .iter()
+                    .copied()
+                    .find(|(p, st)| *st >= t.started_at - 1500 && !taken_pids.contains(p));
+                if let Some((new_pid, _)) = pick {
+                    taken_pids.insert(new_pid);
                     let username = account_name(&state, &id);
                     {
                         let mut map = state.instances.lock().unwrap_or_else(|e| e.into_inner());
@@ -255,6 +276,7 @@ fn tick(app: &tauri::AppHandle) {
                                 acc_secs: t.acc_secs,
                                 last_tick_ms: now,
                                 ticks: 0,
+                                dead_since: None,
                             },
                         );
                     }
@@ -270,6 +292,37 @@ fn tick(app: &tauri::AppHandle) {
                     );
                     continue;
                 }
+                // Процесс исчез, а новый ещё не появился — даём клиенту
+                // до 8 с на самоперезапуск, не вынося вердикт «вышел».
+                let since = t.dead_since.unwrap_or(now);
+                if now - since < 8_000 {
+                    if t.dead_since.is_none() {
+                        t.dead_since = Some(now);
+                        t.status = "launching".into();
+                        t.last_title = None;
+                    }
+                    {
+                        let mut map =
+                            state.instances.lock().unwrap_or_else(|e| e.into_inner());
+                        map.insert(id.clone(), t.clone());
+                    }
+                    changed = true;
+                    snapshot.push(InstanceDto {
+                        account_id: id.clone(),
+                        pid: t.pid,
+                        status: t.status.clone(),
+                        started_at: t.started_at,
+                        title: None,
+                        mode: Some(t.mode.clone()),
+                        playtime_secs: saved_playtime
+                            .get(&id)
+                            .copied()
+                            .unwrap_or(0)
+                            + t.acc_secs,
+                    });
+                    continue;
+                }
+                // 8 с прошло, клиент не вернулся — считаем выходом
             }
 
             // Реальный выход: различаем нормальное закрытие и краш по коду.

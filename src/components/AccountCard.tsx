@@ -1,5 +1,5 @@
 import { Clock, Gamepad2, Pencil, Play, ShieldAlert, ShieldCheck, Square, Trash2 } from "lucide-react";
-import { statusOf, useAccounts, useT } from "../lib/store";
+import { statusOf, useAccounts, useSettings, useT } from "../lib/store";
 import type { TFunc } from "../lib/i18n";
 import type { Account, InstanceStatus } from "../lib/types";
 import { Button, IconButton, cn } from "./ui";
@@ -57,10 +57,16 @@ export function AccountCard({
 }) {
   const t = useT();
   const { instances, presence, launch } = useAccounts();
+  const autoLogin = useSettings((s) => s.settings.autoLogin);
   const status = statusOf(account, instances, presence);
   const inst = instances[account.id];
   const running = status !== "offline";
   const hue = avatarHue(account.username);
+
+  // Режим запуска: фактический у работающего клиента, иначе — прогноз
+  // (что будет использовано при нажатии «Запустить»)
+  const mode = inst?.mode ?? (autoLogin && account.cookie_ok ? "autologin" : "plain");
+  const modePredicted = inst == null;
 
   return (
     <div
@@ -107,17 +113,23 @@ export function AccountCard({
 
       <div className="flex items-center gap-2">
         <StatusChip status={status} />
-        {inst?.mode === "autologin" && (
+        {mode === "autologin" && (
           <span
-            className="inline-flex items-center gap-1 rounded-full border border-accent/40 px-2.5 py-1 text-[11px] font-medium text-accent"
+            className={cn(
+              "inline-flex items-center gap-1 rounded-full border border-accent/40 px-2.5 py-1 text-[11px] font-medium text-accent",
+              modePredicted && "opacity-55",
+            )}
             title={t("accounts.autoBadgeHint")}
           >
             {t("accounts.autoBadge")}
           </span>
         )}
-        {inst && inst.mode === "plain" && (
+        {mode === "plain" && (
           <span
-            className="inline-flex items-center gap-1 rounded-full border border-line px-2.5 py-1 text-[11px] font-medium text-faint"
+            className={cn(
+              "inline-flex items-center gap-1 rounded-full border border-line px-2.5 py-1 text-[11px] font-medium text-faint",
+              modePredicted && "opacity-55",
+            )}
             title={t("accounts.plainBadgeHint")}
           >
             {t("accounts.plainBadge")}

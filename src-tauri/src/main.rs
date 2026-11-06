@@ -29,6 +29,7 @@ fn main() {
                 config_path,
                 config: Mutex::new(config),
                 instances: Mutex::new(std::collections::HashMap::new()),
+                launch_lock: tauri::async_runtime::Mutex::new(()),
             });
 
             // Acrylic-подложка окна в Windows (тихо игнорируется при неудаче)

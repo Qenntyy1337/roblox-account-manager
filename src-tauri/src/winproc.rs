@@ -7,9 +7,27 @@
 
 #![allow(non_snake_case, non_camel_case_types, dead_code, non_upper_case_globals)]
 
+/// Результат скана таблицы хэндлов одного процесса — для диагностики,
+/// почему обход синглтона не нашёл/не закрыл объекты.
+#[derive(Clone, Debug, Default)]
+pub struct SingletonScan {
+    /// Открылся ли процесс с правом PROCESS_DUP_HANDLE.
+    pub open_ok: bool,
+    /// Сколько записей таблицы принадлежит этому процессу.
+    pub in_process: usize,
+    /// Сколько из них Event/Mutant.
+    pub typed: usize,
+    /// Сколько синглтон-хэндлов закрыто.
+    pub closed: usize,
+    /// Примеры имён именованных Event/Mutant (до 6, для диагностики).
+    pub names: Vec<String>,
+}
+
 #[cfg(windows)]
 mod imp {
     use std::path::{Path, PathBuf};
+
+    use super::SingletonScan;
 
     type HANDLE = isize;
     type HWND = isize;
@@ -26,7 +44,7 @@ mod imp {
     const DUPLICATE_SAME_ACCESS: DWORD = 2;
     const WAIT_TIMEOUT: DWORD = 0x0000_0102;
     const STILL_ACTIVE: DWORD = 259;
-    const STATUS_INFO_LENGTH_MISMATCH: i32 = -1_073_741_811; // 0xC0000004
+    const STATUS_INFO_LENGTH_MISMATCH: i32 = -1_073_741_820; // 0xC0000004
     const SystemExtendedHandleInformation: u32 = 64;
     const ObjectNameInformation: u32 = 1;
     const ObjectTypeInformation: u32 = 2;
@@ -287,10 +305,11 @@ mod imp {
         None
     }
 
-    /// Закрыть все синглтон-хэндлы Roblox (Event/Mutant с именем
-    /// `*roblox_single*`, регистронезависимо) в указанном процессе.
-    /// Возвращает количество закрытых хэндлов.
-    pub fn close_singleton_handles(pid: u32) -> usize {
+    /// Закрыть все синглтон-хэндлы Roblox (Event/Mutant, в имени которых
+    /// встречается `singleton`/`roblox_single`, регистронезависимо) в
+    /// указанном процессе. Возвращает подробный результат скана.
+    pub fn close_singleton_handles(pid: u32) -> SingletonScan {
+        let mut scan = SingletonScan::default();
         unsafe {
             // 1) Снимок таблицы хэндлов всей системы
             let mut needed: u32 = 0;
@@ -335,11 +354,12 @@ mod imp {
             let count = count.min(avail);
 
             let target_proc = OpenProcess(PROCESS_DUP_HANDLE, FALSE, pid);
+            scan.open_ok = target_proc != 0;
             if target_proc == 0 {
-                return 0; // нет доступа (нужны права администратора?)
+                // Нет доступа (защита процесса?) —диагностика покажет это
+                return scan;
             }
             let me = GetCurrentProcess();
-            let mut closed = 0usize;
 
             for i in 0..count {
                 let entry =
@@ -347,6 +367,7 @@ mod imp {
                 if entry.process_id as u32 != pid {
                     continue;
                 }
+                scan.in_process += 1;
                 let h_local = (entry.handle & 0xFFFF_FFFF) as isize;
 
                 // Дубликат в наш процесс для чтения метаданных
@@ -386,6 +407,7 @@ mod imp {
                     CloseHandle(dup);
                     continue;
                 }
+                scan.typed += 1;
 
                 // Имя объекта
                 let mut obj_name = String::new();
@@ -404,10 +426,19 @@ mod imp {
                         }
                     }
                 }
+                if !obj_name.is_empty()
+                    && scan.names.len() < 6
+                    && !scan.names.contains(&obj_name)
+                {
+                    let shown: String = obj_name.chars().take(80).collect();
+                    scan.names.push(shown);
+                }
                 CloseHandle(dup);
 
-                // ROBLOX_singletonEvent / ROBLOX_singletonMutex и будущие вариации
-                if obj_name.to_ascii_lowercase().contains("roblox_single") {
+                // ROBLOX_singletonEvent / ROBLOX_singletonMutex и вариации
+                // (в т.ч. переименования без подчёркивания: *Singleton*)
+                let lower = obj_name.to_ascii_lowercase();
+                if lower.contains("roblox_single") || lower.contains("singleton") {
                     let ok = DuplicateHandle(
                         target_proc,
                         h_local,
@@ -418,14 +449,14 @@ mod imp {
                         DUPLICATE_CLOSE_SOURCE,
                     );
                     if ok != 0 {
-                        closed += 1;
+                        scan.closed += 1;
                     }
                 }
             }
 
             CloseHandle(target_proc);
-            closed
         }
+        scan
     }
 
     /// Все PID процессов RobloxPlayerBeta.exe (для очистки путей запуска).
@@ -505,6 +536,8 @@ mod imp {
 mod imp {
     use std::path::Path;
 
+    use super::SingletonScan;
+
     pub fn spawn_roblox(path: &str, _local_app_data: Option<&Path>) -> Result<u32, String> {
         std::process::Command::new(path)
             .spawn()
@@ -536,8 +569,8 @@ mod imp {
         None
     }
 
-    pub fn close_singleton_handles(_pid: u32) -> usize {
-        0
+    pub fn close_singleton_handles(_pid: u32) -> SingletonScan {
+        SingletonScan::default()
     }
 
     pub fn roblox_pids() -> Vec<u32> {
