@@ -77,6 +77,8 @@ function seedDemo(): DemoState {
         cookie_ok: true,
         note: "Основной аккаунт",
         created_at: now - 86400000 * 30,
+        playtime_secs: 12_960,
+        last_played: now - 3600_000,
       },
       {
         id: "demo-alt",
@@ -86,6 +88,8 @@ function seedDemo(): DemoState {
         cookie_ok: true,
         note: "Альт для фарма",
         created_at: now - 86400000 * 3,
+        playtime_secs: 1_845,
+        last_played: now - 86_400_000,
       },
     ],
     instances: {},
@@ -95,7 +99,12 @@ function seedDemo(): DemoState {
 function loadDemo(): DemoState {
   try {
     const raw = localStorage.getItem(DEMO_KEY);
-    if (raw) return JSON.parse(raw) as DemoState;
+    if (raw) {
+      const parsed = JSON.parse(raw) as DemoState;
+      // Новые настройки из обновлений подтягиваем с дефолтами
+      parsed.settings = { ...defaultSettings, ...parsed.settings };
+      return parsed;
+    }
   } catch {
     /* ignore */
   }
@@ -127,11 +136,25 @@ function demoSimulateLaunch(acc: Account, pid: number): void {
     status: "launching",
     started_at: Date.now(),
     title: null,
+    playtime_secs: acc.playtime_secs,
   };
   saveDemo(state);
   emit("instances", Object.values(state.instances));
 
   demoLog("info", acc.username, `Launching RobloxPlayerBeta.exe (pid ${pid}) for account "${acc.username}"`);
+
+  // Наработка в демо растёт вместе с сессией (+5 с каждые 5 с)
+  const playTimer = window.setInterval(() => {
+    const st = loadDemo();
+    const inst = st.instances[acc.id];
+    if (!inst) {
+      window.clearInterval(playTimer);
+      return;
+    }
+    inst.playtime_secs += 5;
+    saveDemo(st);
+    emit("instances", Object.values(st.instances));
+  }, 5000);
 
   setTimeout(() => {
     demoLog("success", acc.username, `Singleton handle ROBLOX_single* closed (pid ${pid})`);
@@ -182,7 +205,7 @@ async function invokeDemo<T>(name: string, args: Record<string, unknown> = {}): 
         accounts: state.accounts,
         instances: Object.values(state.instances),
         robloxPath: DEMO_ROBLOX_PATH,
-        appVersion: "1.0.0",
+        appVersion: "1.0.1",
       } as T;
     }
     case "save_settings": {
@@ -201,6 +224,8 @@ async function invokeDemo<T>(name: string, args: Record<string, unknown> = {}): 
         cookie_ok: cookieOk,
         note: input.note.trim(),
         created_at: Date.now(),
+        playtime_secs: 0,
+        last_played: null,
       };
       state.accounts.push(acc);
       saveDemo(state);
@@ -240,7 +265,8 @@ async function invokeDemo<T>(name: string, args: Record<string, unknown> = {}): 
       if (!acc) throw new Error("account not found");
       const pid = 4000 + Math.floor(Math.random() * 900);
       demoSimulateLaunch(acc, pid);
-      return { pid } as T;
+      // Демо-режим имитирует автологин, если он включён в настройках
+      return { pid, mode: state.settings.autoLogin && acc.cookie_ok ? "autologin" : "plain" } as T;
     }
     case "terminate_instance": {
       const id = args.id as string;

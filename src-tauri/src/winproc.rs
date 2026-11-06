@@ -57,6 +57,13 @@ mod imp {
         fn OpenProcess(desired_access: DWORD, inherit: BOOL, pid: DWORD) -> HANDLE;
         fn CloseHandle(h: HANDLE) -> BOOL;
         fn GetCurrentProcess() -> HANDLE;
+        fn GetProcessTimes(
+            h: HANDLE,
+            created: *mut u64,
+            exited: *mut u64,
+            kernel: *mut u64,
+            user: *mut u64,
+        ) -> BOOL;
         fn DuplicateHandle(
             src_process: HANDLE,
             src_handle: HANDLE,
@@ -138,6 +145,41 @@ mod imp {
                 Some(code)
             }
         }
+    }
+
+    /// Unix-ms время старта процесса (для attach свежих процессов при автологине).
+    pub fn process_start_time(pid: u32) -> Option<i64> {
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+            if h == 0 {
+                return None;
+            }
+            let (mut created, mut exited, mut kernel, mut user): (u64, u64, u64, u64) =
+                (0, 0, 0, 0);
+            let ok = GetProcessTimes(h, &mut created, &mut exited, &mut kernel, &mut user);
+            CloseHandle(h);
+            if ok == 0 {
+                return None;
+            }
+            // FILETIME (100 нс с 1601-01-01) -> unix ms
+            const EPOCH_DIFF_100NS: u64 = 116_444_736_000_000_000;
+            if created < EPOCH_DIFF_100NS {
+                return None;
+            }
+            Some(((created - EPOCH_DIFF_100NS) / 10_000) as i64)
+        }
+    }
+
+    /// Открыть URL-протокол через оболочку (roblox-player:, https: и т.п.).
+    pub fn open_protocol(url: &str) -> Result<(), String> {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("не удалось открыть протокол roblox-player: {e}"))
     }
 
     pub fn terminate(pid: u32) -> Result<(), String> {
@@ -464,6 +506,14 @@ mod imp {
 
     pub fn exit_code(_pid: u32) -> Option<u32> {
         None
+    }
+
+    pub fn process_start_time(_pid: u32) -> Option<i64> {
+        None
+    }
+
+    pub fn open_protocol(_url: &str) -> Result<(), String> {
+        Err("Доступно только в Windows".into())
     }
 
     pub fn terminate(_pid: u32) -> Result<(), String> {

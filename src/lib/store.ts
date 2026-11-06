@@ -1,7 +1,9 @@
 import { create } from "zustand";
 import { cmd, genId, listenEvent } from "./bridge";
 import { makeT, type TFunc } from "./i18n";
+import { showNotification } from "./notify";
 import { applyAccent } from "./theme";
+import { playClick, playCrash, playError, playSuccess, setSoundEnabled } from "./sound";
 import {
   defaultSettings,
   type Account,
@@ -43,6 +45,9 @@ export const useToasts = create<ToastState>((set, get) => ({
 
 export function toast(kind: ToastKind, message: string): void {
   useToasts.getState().push(kind, message);
+  if (kind === "error") playError();
+  else if (kind === "success") playSuccess();
+  else playClick();
 }
 
 /* ------------------------------------------------------------------ */
@@ -66,12 +71,14 @@ export const useSettings = create<SettingsState>((set, get) => ({
   hydrate(s) {
     set({ settings: s, loaded: true, t: makeT(s.language) });
     applyAccent(s.accent);
+    setSoundEnabled(s.soundEnabled);
     document.documentElement.lang = s.language;
   },
   async patch(p) {
     const next = { ...get().settings, ...p };
     set({ settings: next });
     if (p.accent !== undefined) applyAccent(p.accent);
+    if (p.soundEnabled !== undefined) setSoundEnabled(p.soundEnabled);
     if (p.language !== undefined) {
       set({ t: makeT(p.language) });
       document.documentElement.lang = p.language;
@@ -157,8 +164,13 @@ export const useAccounts = create<AccountsState>((set, get) => ({
     const acc = get().accounts.find((a) => a.id === id);
     if (!acc) return;
     try {
-      const res = await cmd<{ pid: number }>("launch_account", { id });
-      toast("success", useSettings.getState().t("toast.clientLaunched", { pid: res.pid }));
+      const res = await cmd<{ pid: number; mode: string }>("launch_account", { id });
+      const st = useSettings.getState();
+      if (res.mode === "autologin") {
+        toast("success", st.t("toast.clientLaunchedAuto"));
+      } else {
+        toast("success", st.t("toast.clientLaunched", { pid: res.pid }));
+      }
     } catch (e) {
       toast("error", useSettings.getState().t("toast.launchFailed", { err: String(e) }));
     }
@@ -232,10 +244,34 @@ export const useLogs = create<LogsState>((set) => ({
   },
 }));
 
+/** Уведомления Windows по ключевым событиям (даже при свёрнутом окне) */
+function maybeNotify(e: LogEntry): void {
+  const st = useSettings.getState();
+  if (!st.settings.winNotifications) return;
+  const name = e.account ?? "Roblox";
+  const msg = e.message;
+  if (e.level === "error" && msg.includes("CRASHED")) {
+    void showNotification(st.t("app.title"), st.t("notif.crashed", { name }));
+  } else if (e.level === "success" && msg.includes("Client started")) {
+    void showNotification(st.t("app.title"), st.t("notif.started", { name }));
+  } else if (e.level === "success" && msg.startsWith("Joined game")) {
+    void showNotification(st.t("app.title"), st.t("notif.joined", { name }));
+  }
+}
+
 /** Подписка на события бэкенда — вызывается один раз при старте приложения */
 export function initEventBridge(): void {
   listenEvent("log", (payload) => {
-    useLogs.getState().add(payload as LogEntry);
+    const e = payload as LogEntry;
+    useLogs.getState().add(e);
+    // Звуки событий: ошибка/краш — громкий сигнал, вход в игру — радостный
+    if (e.level === "error") {
+      if (e.message.toLowerCase().includes("crashed")) playCrash();
+      else playError();
+    } else if (e.level === "success" && e.message.startsWith("Joined game")) {
+      playSuccess();
+    }
+    maybeNotify(e);
   });
   listenEvent("instances", (payload) => {
     useAccounts.getState().setInstances(payload as InstanceInfo[]);

@@ -6,6 +6,7 @@ import type { Account } from "../lib/types";
 import { Button, Field, Modal, TextField } from "./ui";
 
 type ValidState = null | "ok" | "fail";
+type FailInfo = { reason: string; detail: string | null } | null;
 
 export function AccountModal({
   open,
@@ -27,6 +28,7 @@ export function AccountModal({
   const [busy, setBusy] = useState(false);
   const [validating, setValidating] = useState(false);
   const [valid, setValid] = useState<ValidState>(null);
+  const [fail, setFail] = useState<FailInfo>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -35,6 +37,7 @@ export function AccountModal({
     setNote(account?.note ?? "");
     setShowCookie(false);
     setValid(null);
+    setFail(null);
     setBusy(false);
     setValidating(false);
   }, [open, account]);
@@ -43,14 +46,26 @@ export function AccountModal({
     if (!cookie.trim()) return;
     setValidating(true);
     setValid(null);
+    setFail(null);
     try {
-      const res = await cmd<{ ok: boolean; username: string | null }>("validate_cookie", {
+      const res = await cmd<{
+        ok: boolean;
+        username: string | null;
+        reason?: string | null;
+        detail?: string | null;
+      }>("validate_cookie", {
         cookie: cookie.trim(),
       });
       setValid(res.ok ? "ok" : "fail");
-      if (res.ok && res.username && !username.trim()) setUsername(res.username);
-    } catch {
+      if (res.ok) {
+        setFail(null);
+        if (res.username && !username.trim()) setUsername(res.username);
+      } else {
+        setFail({ reason: res.reason ?? "invalid", detail: res.detail ?? null });
+      }
+    } catch (e) {
       setValid("fail");
+      setFail({ reason: "network", detail: String(e) });
     } finally {
       setValidating(false);
     }
@@ -132,6 +147,7 @@ export function AccountModal({
               onChange={(e) => {
                 setCookie(e.target.value);
                 setValid(null);
+                setFail(null);
               }}
             />
             <button
@@ -163,7 +179,18 @@ export function AccountModal({
             {validating ? t("accounts.validating") : t("accounts.validate")}
           </Button>
           {valid === "ok" && <span className="text-xs text-ok">{t("accounts.valid.ok")}</span>}
-          {valid === "fail" && <span className="text-xs text-err">{t("accounts.valid.fail")}</span>}
+          {valid === "fail" && (
+            <div className="flex flex-col gap-0.5">
+              <span className="text-xs text-err">
+                {fail ? t(`accounts.valid.fail.${fail.reason}`) : t("accounts.valid.fail")}
+              </span>
+              {fail?.detail && (
+                <span className="max-w-[280px] break-all font-mono text-[11px] text-faint">
+                  {fail.detail}
+                </span>
+              )}
+            </div>
+          )}
         </div>
 
         <Field id="acc-note" label={t("accounts.field.note")}>

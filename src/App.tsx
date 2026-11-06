@@ -18,7 +18,7 @@ import { SettingsPage } from "./pages/SettingsPage";
 
 export default function App() {
   const [page, setPage] = useState<PageId>("accounts");
-  const [version, setVersion] = useState("1.0.0");
+  const [version, setVersion] = useState("1.0.1");
   const [ready, setReady] = useState(false);
 
   useEffect(() => {

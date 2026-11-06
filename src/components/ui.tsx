@@ -5,6 +5,7 @@ import type {
   TextareaHTMLAttributes,
 } from "react";
 import { useEffect, useId, useRef, useState } from "react";
+import { playClick } from "../lib/sound";
 
 export const cn = (...xs: (string | false | null | undefined)[]) =>
   xs.filter(Boolean).join(" ");
@@ -40,7 +41,11 @@ export function Button({
     danger: "bg-err/10 border border-err/30 text-err hover:bg-err/20",
   } as const;
   return (
-    <button className={cn(base, sizes[size], variants[variant], className)} {...rest}>
+    <button
+      className={cn(base, sizes[size], variants[variant], className)}
+      onPointerDown={() => playClick()}
+      {...rest}
+    >
       {icon}
       {children}
     </button>
@@ -58,6 +63,7 @@ export function IconButton({ label, danger, active, className, children, ...rest
     <button
       title={label}
       aria-label={label}
+      onPointerDown={() => playClick()}
       className={cn(
         "inline-flex h-8 w-8 items-center justify-center rounded-lg border border-transparent text-mut transition-all duration-150",
         "hover:bg-white/[0.07] hover:text-ink active:scale-95",
@@ -162,7 +168,10 @@ export function Toggle({ checked, disabled, onChange, label }: ToggleProps) {
       aria-checked={checked}
       aria-label={label}
       disabled={disabled}
-      onClick={() => onChange(!checked)}
+      onClick={() => {
+        playClick();
+        onChange(!checked);
+      }}
       className={cn(
         "relative h-6 w-11 shrink-0 rounded-full transition-all duration-200 outline-none",
         checked
@@ -213,7 +222,10 @@ export function Select<T extends string>({ items, value, onChange, className }: 
     <div ref={ref} className={cn("relative", className)}>
       <button
         type="button"
-        onClick={() => setOpen((o) => !o)}
+        onClick={() => {
+          playClick();
+          setOpen((o) => !o);
+        }}
         className={cn(
           inputCls,
           "h-9 flex items-center justify-between gap-2 pr-2 text-left",

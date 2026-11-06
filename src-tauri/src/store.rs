@@ -13,6 +13,12 @@ pub struct Account {
     pub cookie_ok: bool,
     pub note: String,
     pub created_at: i64,
+    /// Суммарная наработка за все сессии, секунды.
+    #[serde(default)]
+    pub playtime_secs: u64,
+    /// Последняя активность (конец последней сессии), unix ms.
+    #[serde(default)]
+    pub last_played: Option<i64>,
     /// Зашифрованный DPAPI .ROBLOSECURITY (base64). Не сериализуется наружу.
     #[serde(default, skip_serializing)]
     pub cookie_enc: String,
@@ -29,6 +35,12 @@ pub struct Settings {
     pub launch_delay_ms: i64,
     pub isolate_data: bool,
     pub close_singleton: bool,
+    /// Автологин: клиент запускается сразу с нужным аккаунтом (auth ticket).
+    pub auto_login: bool,
+    /// Звуковые эффекты интерфейса (клики, ошибки, краши).
+    pub sound_enabled: bool,
+    /// Уведомления Windows (краш, запуск, вход в игру).
+    pub win_notifications: bool,
     pub roblox_path: Option<String>,
 }
 
@@ -43,6 +55,9 @@ impl Default for Settings {
             launch_delay_ms: 900,
             isolate_data: true,
             close_singleton: true,
+            auto_login: true,
+            sound_enabled: true,
+            win_notifications: true,
             roblox_path: None,
         }
     }

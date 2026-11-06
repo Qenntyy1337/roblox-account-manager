@@ -14,6 +14,10 @@ export interface Account {
   cookie_ok: boolean;
   note: string;
   created_at: number;
+  /** Суммарная наработка за все сессии, секунды */
+  playtime_secs: number;
+  /** Конец последней сессии, unix ms */
+  last_played: number | null;
 }
 
 export interface AccountInput {
@@ -28,6 +32,8 @@ export interface InstanceInfo {
   status: InstanceStatus;
   started_at: number;
   title: string | null;
+  /** Суммарная наработка (сохранённая + текущая сессия), секунды */
+  playtime_secs: number;
 }
 
 export interface LogEntry {
@@ -52,6 +58,12 @@ export interface Settings {
   isolateData: boolean;
   /** Закрывать синглтон-хэндлы Roblox (мульти-инстанс) */
   closeSingleton: boolean;
+  /** Автологин: клиент запускается сразу с нужным аккаунтом */
+  autoLogin: boolean;
+  /** Звуковые эффекты интерфейса (клики, ошибки, краши) */
+  soundEnabled: boolean;
+  /** Уведомления Windows (краш, запуск, вход в игру) */
+  winNotifications: boolean;
   robloxPath: string | null;
 }
 
@@ -75,5 +87,8 @@ export const defaultSettings: Settings = {
   launchDelayMs: 900,
   isolateData: true,
   closeSingleton: true,
+  autoLogin: true,
+  soundEnabled: true,
+  winNotifications: true,
   robloxPath: null,
 };

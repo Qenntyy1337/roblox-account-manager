@@ -1,19 +1,23 @@
 import {
+  Bell,
   Database,
   FolderOpen,
   Image as ImageIcon,
   Info,
   Languages,
+  LogIn,
   Palette,
   RotateCcw,
   Rocket,
   ShieldAlert,
   Trash2,
   TriangleAlert,
+  Volume2,
 } from "lucide-react";
 import { useState } from "react";
 import { cmd, isTauri } from "../lib/bridge";
 import { LANGUAGES } from "../lib/i18n";
+import { previewSound, type SoundName } from "../lib/sound";
 import { toast, useSettings, useT } from "../lib/store";
 import { PALETTES } from "../lib/theme";
 import {
@@ -27,6 +31,15 @@ import {
   Toggle,
   cn,
 } from "../components/ui";
+
+/** Кнопки проверки звука в настройках */
+const SOUND_PREVIEWS: { id: SoundName; label: string }[] = [
+  { id: "click", label: "settings.sound.sClick" },
+  { id: "success", label: "settings.sound.sSuccess" },
+  { id: "error", label: "settings.sound.sError" },
+  { id: "launch", label: "settings.sound.sLaunch" },
+  { id: "crash", label: "settings.sound.sCrash" },
+];
 
 export function SettingsPage() {
   const t = useT();
@@ -134,6 +147,59 @@ export function SettingsPage() {
                   />
                 </Field>
               </div>
+
+              <div className="flex items-start justify-between gap-4 rounded-xl border border-line bg-surface/50 p-3.5">
+                <div className="flex items-start gap-2.5">
+                  <Volume2 size={16} className="mt-0.5 shrink-0 text-mut" />
+                  <div>
+                    <div className="text-[13px] font-medium text-ink">{t("settings.sound")}</div>
+                    <div className="mt-0.5 text-xs leading-snug text-faint">
+                      {t("settings.sound.desc")}
+                    </div>
+                  </div>
+                </div>
+                <Toggle
+                  checked={settings.soundEnabled}
+                  onChange={(v) => void patch({ soundEnabled: v })}
+                  label={t("settings.sound")}
+                />
+              </div>
+
+              {/* Проверка звуковых эффектов */}
+              <div className="flex flex-wrap items-center gap-2 pl-1">
+                <span className="mr-1 text-[12px] text-faint">{t("settings.sound.preview")}</span>
+                {SOUND_PREVIEWS.map((s) => (
+                  <button
+                    key={s.id}
+                    onClick={() => previewSound(s.id)}
+                    title={t(s.label)}
+                    className={cn(
+                      "rounded-full border border-line bg-surface/60 px-2.5 py-1 text-[11px] text-mut",
+                      "transition-all duration-150 hover:border-accent/50 hover:text-ink active:scale-95",
+                    )}
+                  >
+                    {t(s.label)}
+                  </button>
+                ))}
+              </div>
+
+              {/* Уведомления Windows */}
+              <div className="flex items-start justify-between gap-4 rounded-xl border border-line bg-surface/50 p-3.5">
+                <div className="flex items-start gap-2.5">
+                  <Bell size={16} className="mt-0.5 shrink-0 text-mut" />
+                  <div>
+                    <div className="text-[13px] font-medium text-ink">{t("settings.notifications")}</div>
+                    <div className="mt-0.5 text-xs leading-snug text-faint">
+                      {t("settings.notifications.desc")}
+                    </div>
+                  </div>
+                </div>
+                <Toggle
+                  checked={settings.winNotifications}
+                  onChange={(v) => void patch({ winNotifications: v })}
+                  label={t("settings.notifications")}
+                />
+              </div>
             </div>
           </SectionCard>
 
@@ -202,6 +268,28 @@ export function SettingsPage() {
                     onChange={(v) => void patch({ launchDelayMs: v })}
                   />
                 </Field>
+
+                <div className="flex items-start justify-between gap-4 rounded-xl border border-line bg-surface/50 p-3.5">
+                  <div className="flex items-start gap-2.5">
+                    <LogIn size={16} className="mt-0.5 shrink-0 text-mut" />
+                    <div>
+                      <div className="text-[13px] font-medium text-ink">
+                        {t("settings.launcher.autologin")}
+                      </div>
+                      <div className="mt-0.5 text-xs leading-snug text-faint">
+                        {t("settings.launcher.autologin.desc")}
+                      </div>
+                      <div className="mt-1 text-[11px] leading-snug text-warn/80">
+                        {t("settings.launcher.autologin.hint")}
+                      </div>
+                    </div>
+                  </div>
+                  <Toggle
+                    checked={settings.autoLogin}
+                    onChange={(v) => void patch({ autoLogin: v })}
+                    label={t("settings.launcher.autologin")}
+                  />
+                </div>
 
                 <div className="flex items-start justify-between gap-4 rounded-xl border border-line bg-surface/50 p-3.5">
                   <div>
@@ -294,7 +382,7 @@ export function SettingsPage() {
               <div className="flex items-center gap-2">
                 <span className="text-faint">{t("settings.about.version")}:</span>
                 <span className="rounded-md border border-accent/40 bg-accent/10 px-2 py-0.5 font-mono text-xs text-accent">
-                  1.0.0
+                  1.0.1
                 </span>
               </div>
               <p>{t("settings.about.stack")}</p>

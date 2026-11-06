@@ -35,12 +35,18 @@ pub struct BootstrapDto {
 #[derive(Serialize, Clone)]
 pub struct LaunchDto {
     pub pid: u32,
+    /// autologin | plain — как был произведён запуск.
+    pub mode: String,
 }
 
 #[derive(Serialize)]
 pub struct ValidateDto {
     pub ok: bool,
     pub username: Option<String>,
+    /// Машинный ключ причины отказа: invalid | network | rate_limited.
+    pub reason: Option<String>,
+    /// Техническая деталь для подсказки/лога.
+    pub detail: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -98,6 +104,28 @@ fn persist(state: &AppState, cfg: &Config) -> Result<(), String> {
     store::save(&state.config_path, cfg)
 }
 
+/// Слить накопленное время сессий (Track.acc_secs) в аккаунты и сохранить
+/// на диск. Вызывается из монитора раз в ~30 с и при завершении клиента.
+pub fn flush_playtime(state: &AppState) {
+    let now = chrono::Utc::now().timestamp_millis();
+    let mut cfg = state.config.lock().unwrap_or_else(|e| e.into_inner());
+    let mut map = state.instances.lock().unwrap_or_else(|e| e.into_inner());
+    let mut dirty = false;
+    for (id, t) in map.iter_mut() {
+        if t.acc_secs > 0 {
+            if let Some(a) = cfg.accounts.iter_mut().find(|a| &a.id == id) {
+                a.playtime_secs += t.acc_secs;
+                a.last_played = Some(now);
+                dirty = true;
+            }
+            t.acc_secs = 0;
+        }
+    }
+    if dirty {
+        let _ = store::save(&state.config_path, &cfg);
+    }
+}
+
 /* ------------------------- Команды ------------------------- */
 
 #[tauri::command]
@@ -135,7 +163,7 @@ pub async fn add_account(
     state: State<'_, AppState>,
     input: AccountInputDto,
 ) -> Result<Account, String> {
-    let cookie = input.cookie.clone().unwrap_or_default().trim().to_string();
+    let cookie = roblox::normalize_cookie(&input.cookie.clone().unwrap_or_default());
     if cookie.is_empty() {
         return Err("Cookie .ROBLOSECURITY обязателен".into());
     }
@@ -143,15 +171,20 @@ pub async fn add_account(
     // Сеть — в блокирующем пуле
     let probe = {
         let cookie = cookie.clone();
-        tauri::async_runtime::spawn_blocking(move || {
-            let user = roblox::validate_cookie(&cookie);
-            let avatar = user.as_ref().and_then(|u| roblox::avatar_url(u.id));
-            (user, avatar)
+        tauri::async_runtime::spawn_blocking(move || match roblox::validate_cookie_ex(&cookie) {
+            Ok(user) => {
+                let avatar = roblox::avatar_url(user.id);
+                (Some(user), avatar, None)
+            }
+            Err(e) => (None, None, Some(e)),
         })
         .await
         .map_err(|e| e.to_string())?
     };
-    let (user, avatar) = probe;
+    let (user, avatar, fail) = probe;
+    if let Some(e) = &fail {
+        log_event(&app, "error", None, &format!("Cookie validation failed: {}", e.detail()));
+    }
 
     let username = input
         .username
@@ -199,14 +232,19 @@ pub async fn update_account(
     id: String,
     input: AccountInputDto,
 ) -> Result<Account, String> {
-    let cookie_opt = input.cookie.clone().filter(|s| !s.trim().is_empty());
+    let cookie_opt = input
+        .cookie
+        .map(|c| roblox::normalize_cookie(&c))
+        .filter(|s| !s.is_empty());
 
     let probe = if let Some(cookie) = cookie_opt.clone() {
         Some(
-            tauri::async_runtime::spawn_blocking(move || {
-                let user = roblox::validate_cookie(&cookie);
-                let avatar = user.as_ref().and_then(|u| roblox::avatar_url(u.id));
-                (user, avatar)
+            tauri::async_runtime::spawn_blocking(move || match roblox::validate_cookie_ex(&cookie) {
+                Ok(user) => {
+                    let avatar = roblox::avatar_url(user.id);
+                    (Some(user), avatar, None)
+                }
+                Err(e) => (None, None, Some(e)),
             })
             .await
             .map_err(|e| e.to_string())?,
@@ -229,16 +267,32 @@ pub async fn update_account(
             acc.note = n.trim().to_string();
         }
         if let Some(cookie) = cookie_opt {
-            acc.cookie_enc = crypto::encrypt_cookie(cookie.trim());
-            match probe {
-                Some((Some(user), avatar)) => {
-                    acc.cookie_ok = true;
-                    acc.user_id = Some(user.id);
-                    acc.avatar_url = avatar;
+            acc.cookie_enc = crypto::encrypt_cookie(&cookie);
+            let mut fail_reason = None;
+            if let Some((user, avatar, err)) = probe {
+                match (user, err) {
+                    (Some(u), _) => {
+                        acc.cookie_ok = true;
+                        acc.user_id = Some(u.id);
+                        acc.avatar_url = avatar;
+                    }
+                    (None, Some(e)) => {
+                        acc.cookie_ok = false;
+                        fail_reason = Some(e);
+                    }
+                    (None, None) => acc.cookie_ok = false,
                 }
-                _ => {
-                    acc.cookie_ok = false;
-                }
+            } else {
+                acc.cookie_ok = false;
+            }
+            if let Some(e) = fail_reason {
+                let uname = acc.username.clone();
+                log_event(
+                    &app,
+                    "error",
+                    Some(&uname),
+                    &format!("Cookie validation failed: {}", e.detail()),
+                );
             }
         }
         acc.clone()
@@ -256,6 +310,8 @@ pub async fn update_account(
 
 #[tauri::command]
 pub fn delete_account(app: AppHandle, state: State<AppState>, id: String) -> Result<(), String> {
+    // Слить накопленное время до удаления аккаунта
+    flush_playtime(state.inner());
     let username;
     {
         let mut cfg = state.config.lock().unwrap_or_else(|e| e.into_inner());
@@ -283,7 +339,7 @@ pub async fn launch_account(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<LaunchDto, String> {
-    let (path, isolate, close_single, username) = {
+    let (path, isolate, close_single, auto_login, username, cookie_ok, cookie_enc) = {
         let cfg = state.config.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let acc = cfg
             .accounts
@@ -296,7 +352,15 @@ pub async fn launch_account(
             .clone()
             .or_else(winproc::detect_client_path)
             .ok_or("RobloxPlayerBeta.exe не найден — укажите путь в настройках")?;
-        (path, cfg.settings.isolate_data, cfg.settings.close_singleton, acc.username.clone())
+        (
+            path,
+            cfg.settings.isolate_data,
+            cfg.settings.close_singleton,
+            cfg.settings.auto_login,
+            acc.username.clone(),
+            acc.cookie_ok,
+            acc.cookie_enc.clone(),
+        )
     };
 
     if state
@@ -308,6 +372,84 @@ pub async fn launch_account(
         return Err("Клиент этого аккаунта уже запущен".into());
     }
 
+    /* ---------- Автологин: auth ticket + протокол roblox-player ---------- */
+    if auto_login && cookie_ok {
+        let ticket = tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+            let cookie = crypto::decrypt_cookie(&cookie_enc)
+                .ok_or("не удалось расшифровать сохранённый cookie")?;
+            roblox::auth_ticket(&cookie)
+        })
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|r| r);
+
+        match ticket {
+            Ok(ticket) => {
+                let url = roblox::player_protocol_url(&ticket);
+                match winproc::open_protocol(&url) {
+                    Ok(()) => {
+                        let now = now_ms();
+                        {
+                            let mut map =
+                                state.instances.lock().unwrap_or_else(|e| e.into_inner());
+                            map.insert(
+                                id.clone(),
+                                Track {
+                                    // Клиент ещё не появился — монитору найти самому
+                                    pid: 0,
+                                    status: "launching".into(),
+                                    started_at: now,
+                                    last_title: None,
+                                    acc_secs: 0,
+                                    last_tick_ms: now,
+                                    ticks: 0,
+                                },
+                            );
+                        }
+                        log_event(
+                            &app,
+                            "success",
+                            Some(&username),
+                            &format!(
+                                "Auth ticket issued — launching client via roblox-player protocol (autologin) for \"{username}\""
+                            ),
+                        );
+                        if close_single {
+                            spawn_close_singletons(&app, &username);
+                        }
+                        return Ok(LaunchDto { pid: 0, mode: "autologin".into() });
+                    }
+                    Err(err) => {
+                        log_event(
+                            &app,
+                            "warning",
+                            Some(&username),
+                            &format!("Autologin failed ({err}) — falling back to plain launch"),
+                        );
+                    }
+                }
+            }
+            Err(err) => {
+                log_event(
+                    &app,
+                    "warning",
+                    Some(&username),
+                    &format!(
+                        "Auth ticket request failed ({err}) — falling back to plain launch"
+                    ),
+                );
+            }
+        }
+    } else if auto_login && !cookie_ok {
+        log_event(
+            &app,
+            "warning",
+            Some(&username),
+            "Autologin skipped: cookie is not verified — launching without login",
+        );
+    }
+
+    /* ---------- Обычный запуск: напрямую RobloxPlayerBeta.exe ---------- */
     let data_dir = state.data_dir.clone();
     let id2 = id.clone();
     let pid = tauri::async_runtime::spawn_blocking(move || -> Result<u32, String> {
@@ -325,13 +467,17 @@ pub async fn launch_account(
 
     {
         let mut map = state.instances.lock().unwrap_or_else(|e| e.into_inner());
+        let now = now_ms();
         map.insert(
             id.clone(),
             Track {
                 pid,
                 status: "launching".into(),
-                started_at: now_ms(),
+                started_at: now,
                 last_title: None,
+                acc_secs: 0,
+                last_tick_ms: now,
+                ticks: 0,
             },
         );
     }
@@ -345,45 +491,52 @@ pub async fn launch_account(
 
     // Обход синглтон-хэндла: закрываем ROBLOX_single* во всех клиентах
     if close_single {
-        let app2 = app.clone();
-        let username2 = username.clone();
-        std::thread::spawn(move || {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
-            let mut closed_any = false;
-            while std::time::Instant::now() < deadline {
-                for pid in winproc::roblox_pids() {
-                    if !winproc::is_alive(pid) {
-                        continue;
-                    }
-                    let n = winproc::close_singleton_handles(pid);
-                    if n > 0 {
-                        closed_any = true;
-                        log_event(
-                            &app2,
-                            "success",
-                            Some(&username2),
-                            &format!("Closed {n} Roblox singleton handle(s) (pid {pid})"),
-                        );
-                    }
-                }
-                std::thread::sleep(std::time::Duration::from_millis(250));
-            }
-            if !closed_any {
-                log_event(
-                    &app2,
-                    "debug",
-                    Some(&username2),
-                    "No Roblox singleton handles found (path is clear)",
-                );
-            }
-        });
+        spawn_close_singletons(&app, &username);
     }
 
-    Ok(LaunchDto { pid })
+    Ok(LaunchDto { pid, mode: "plain".into() })
+}
+
+/// Обход синглтон-хэндла: закрываем ROBLOX_single* во всех клиентах
+/// (фоновый поток на 12 с после каждого запуска).
+fn spawn_close_singletons(app: &AppHandle, username: &str) {
+    let app2 = app.clone();
+    let username2 = username.to_string();
+    std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
+        let mut closed_any = false;
+        while std::time::Instant::now() < deadline {
+            for pid in winproc::roblox_pids() {
+                if !winproc::is_alive(pid) {
+                    continue;
+                }
+                let n = winproc::close_singleton_handles(pid);
+                if n > 0 {
+                    closed_any = true;
+                    log_event(
+                        &app2,
+                        "success",
+                        Some(&username2),
+                        &format!("Closed {n} Roblox singleton handle(s) (pid {pid})"),
+                    );
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        if !closed_any {
+            log_event(
+                &app2,
+                "debug",
+                Some(&username2),
+                "No Roblox singleton handles found (path is clear)",
+            );
+        }
+    });
 }
 
 #[tauri::command]
 pub fn terminate_instance(app: AppHandle, state: State<AppState>, id: String) -> Result<(), String> {
+    flush_playtime(state.inner());
     let pid = {
         let mut map = state.instances.lock().unwrap_or_else(|e| e.into_inner());
         map.remove(&id).map(|t| t.pid)
@@ -403,6 +556,7 @@ pub fn terminate_instance(app: AppHandle, state: State<AppState>, id: String) ->
 
 #[tauri::command]
 pub fn close_all(app: AppHandle, state: State<AppState>) -> Result<(), String> {
+    flush_playtime(state.inner());
     let pids: Vec<(String, u32)> = {
         let mut map = state.instances.lock().unwrap_or_else(|e| e.into_inner());
         map.drain().map(|(k, v)| (k, v.pid)).collect()
@@ -416,13 +570,34 @@ pub fn close_all(app: AppHandle, state: State<AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn validate_cookie(cookie: String) -> ValidateDto {
-    let user = tauri::async_runtime::spawn_blocking(move || roblox::validate_cookie(&cookie))
+pub async fn validate_cookie(app: AppHandle, cookie: String) -> ValidateDto {
+    let cleaned = roblox::normalize_cookie(&cookie);
+    let res = tauri::async_runtime::spawn_blocking(move || roblox::validate_cookie_ex(&cleaned))
         .await
-        .unwrap_or(None);
-    ValidateDto {
-        ok: user.is_some(),
-        username: user.map(|u| u.name),
+        .unwrap_or_else(|e| Err(roblox::CookieCheckError::Network(e.to_string())));
+
+    if let Err(e) = &res {
+        log_event(
+            &app,
+            "error",
+            None,
+            &format!("Cookie validation failed: {}", e.detail()),
+        );
+    }
+
+    match res {
+        Ok(user) => ValidateDto {
+            ok: true,
+            username: Some(user.name),
+            reason: None,
+            detail: None,
+        },
+        Err(e) => ValidateDto {
+            ok: false,
+            username: None,
+            reason: Some(e.reason().to_string()),
+            detail: Some(e.detail()),
+        },
     }
 }
 

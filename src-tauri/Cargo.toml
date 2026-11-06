@@ -1,6 +1,6 @@
 [package]
 name = "roblox-account-manager"
-version = "1.0.0"
+version = "1.0.1"
 description = "Roblox Account Manager — мульти-аккаунт лаунчер с современным UI"
 authors = ["you"]
 edition = "2021"
@@ -17,6 +17,7 @@ chrono = { version = "0.4", features = ["serde"] }
 base64 = "0.22"
 ureq = { version = "2", default-features = false, features = ["json", "native-tls"] }
 rfd = "0.15"
+tauri-plugin-notification = "2"
 
 [target.'cfg(windows)'.dependencies]
 window-vibrancy = "0.5"

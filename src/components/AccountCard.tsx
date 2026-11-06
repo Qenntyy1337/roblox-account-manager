@@ -1,5 +1,6 @@
-import { Pencil, Play, ShieldAlert, ShieldCheck, Square, Trash2 } from "lucide-react";
+import { Clock, Gamepad2, Pencil, Play, ShieldAlert, ShieldCheck, Square, Trash2 } from "lucide-react";
 import { statusOf, useAccounts, useT } from "../lib/store";
+import type { TFunc } from "../lib/i18n";
 import type { Account, InstanceStatus } from "../lib/types";
 import { Button, IconButton, cn } from "./ui";
 
@@ -14,6 +15,17 @@ function avatarHue(name: string): number {
   let h = 0;
   for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) | 0;
   return Math.abs(h) % 360;
+}
+
+/** «3 ч 24 мин» / «12 мин» / «меньше минуты» */
+export function fmtPlaytime(secs: number, t: TFunc): string {
+  const s = Math.max(0, Math.floor(secs));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (h === 0 && m === 0) return t("time.lessMinute");
+  const hPart = h > 0 ? t("time.hours", { n: h }) : null;
+  const mPart = t("time.minutes", { n: m });
+  return hPart ? `${hPart} ${mPart}` : mPart;
 }
 
 export function StatusChip({ status }: { status: InstanceStatus }) {
@@ -108,6 +120,36 @@ export function AccountCard({
           <span className="ml-auto font-mono text-[11px] text-faint">PID {inst.pid}</span>
         )}
       </div>
+
+      {status === "ingame" && inst?.title && (
+        <div
+          className="flex min-w-0 items-center gap-1.5 rounded-lg border border-ok/25 bg-ok/[0.07] px-2.5 py-1.5 text-xs text-ok"
+          title={inst.title}
+        >
+          <Gamepad2 size={13} className="shrink-0" />
+          <span className="truncate">{inst.title}</span>
+        </div>
+      )}
+
+      {/* Наработка: суммарная + текущая сессия */}
+      {(() => {
+        const total = (account.playtime_secs ?? 0) + (inst?.playtime_secs ?? 0);
+        const session = inst ? Math.floor((Date.now() - inst.started_at) / 1000) : 0;
+        if (total <= 0 && !inst) return null;
+        return (
+          <div className="flex items-center gap-1.5 text-[11px] text-faint">
+            <Clock size={12} className="shrink-0" />
+            <span>
+              {t("accounts.playtime")}: {fmtPlaytime(total, t)}
+            </span>
+            {inst && session > 0 && (
+              <span className="text-info">
+                · {t("accounts.session")}: {fmtPlaytime(session, t)}
+              </span>
+            )}
+          </div>
+        );
+      })()}
 
       <div className="flex items-center gap-2">
         {running ? (
