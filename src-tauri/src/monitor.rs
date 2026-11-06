@@ -214,9 +214,11 @@ fn tick(app: &tauri::AppHandle) {
 
             // Реальный выход: различаем нормальное закрытие и краш по коду.
             let code = winproc::exit_code(t.pid);
-            // Добираем время с последнего тика, чтобы ничего не потерять
-            let tail_ms = (now - t.last_tick_ms).clamp(0, 10_000);
-            t.acc_secs += (tail_ms / 1000) as u64;
+            // Добираем время с последнего тика (только если был в игре)
+            if t.status == "ingame" {
+                let tail_ms = (now - t.last_tick_ms).clamp(0, 10_000);
+                t.acc_secs += (tail_ms / 1000) as u64;
+            }
             let username = {
                 let cfg = state.config.lock().unwrap_or_else(|e| e.into_inner());
                 cfg.accounts
@@ -292,17 +294,7 @@ fn tick(app: &tauri::AppHandle) {
             continue;
         }
 
-        // Клиент жив: копим наработку (дельта между тиками, с потолком 10 с).
-        let delta_ms = (now - t.last_tick_ms).clamp(0, 10_000);
-        t.acc_secs += (delta_ms / 1000) as u64;
-        t.last_tick_ms = now;
-        t.ticks = t.ticks.saturating_add(1);
-        if t.ticks >= 15 {
-            // Раз в ~30 с сохраняем наработку на диск.
-            t.ticks = 0;
-            flush_playtime(state.inner());
-        }
-
+        // Клиент жив: статус по заголовку окна.
         let raw_title = winproc::window_title(t.pid);
         let status = match &raw_title {
             Some(s)
@@ -314,6 +306,20 @@ fn tick(app: &tauri::AppHandle) {
             }
             _ => "online",
         };
+
+        // Копим наработку ТОЛЬКО пока в игре (время в меню не считается),
+        // дельта между тиками с потолком 10 с.
+        if status == "ingame" {
+            let delta_ms = (now - t.last_tick_ms).clamp(0, 10_000);
+            t.acc_secs += (delta_ms / 1000) as u64;
+        }
+        t.last_tick_ms = now;
+        t.ticks = t.ticks.saturating_add(1);
+        if t.ticks >= 15 {
+            // Раз в ~30 с сохраняем наработку на диск.
+            t.ticks = 0;
+            flush_playtime(state.inner());
+        }
 
         // Чистое название игры (без суффикса " - Roblox") для UI и логов
         let title = raw_title.map(|s| {

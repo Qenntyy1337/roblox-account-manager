@@ -1,8 +1,6 @@
 //! Взаимодействие с публичными API Roblox: проверка cookie, аватар,
 //! presence-статусы. Все запросы с таймаутами и без паник.
 
-use base64::engine::general_purpose::STANDARD as B64;
-use base64::Engine;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -154,59 +152,61 @@ pub fn avatar_url(user_id: u64) -> Option<String> {
 }
 
 /// Получить одноразовый auth ticket для автологина.
-/// POST https://auth.roblox.com/v1/authentication-ticket с обработкой
-/// x-csrf-token (первый ответ 403 выдаёт токен, повтор — возвращает билет
-/// в заголовке RBXAuthenticationTicket).
+/// Рабочий флоу (как в ic3w0lf22/RAM и RIFT): POST на
+/// https://auth.roblox.com/v1/authentication-ticket/ с Referer;
+/// первый ответ 403 выдаёт x-csrf-token, повтор (до 3 попыток)
+/// возвращает билет в заголовке rbx-authentication-ticket.
 pub fn auth_ticket(cookie: &str) -> Result<String, String> {
     let hdr = cookie_header(cookie);
-    let url = "https://auth.roblox.com/v1/authentication-ticket";
-    let body = serde_json::json!({});
+    const URL: &str = "https://auth.roblox.com/v1/authentication-ticket/";
+    const REFERER: &str = "https://www.roblox.com/games/4924922222/Brookhaven-RP";
 
     let build = || {
         agent()
-            .post(url)
+            .post(URL)
             .set("Cookie", &hdr)
-            .set("Content-Type", "application/json")
+            .set("Referer", REFERER)
             .set("Accept", "application/json")
     };
 
-    let resp = match build().send_json(body.clone()) {
-        Ok(r) => Ok(r),
-        Err(ureq::Error::Status(403, r)) => {
-            let csrf = r
-                .header("x-csrf-token")
-                .ok_or_else(|| "403 без заголовка x-csrf-token".to_string())?
-                .to_string();
-            build()
-                .set("x-csrf-token", &csrf)
-                .send_json(body)
-                .map_err(|e| match e {
-                    ureq::Error::Status(code, _) => format!("HTTP {code}"),
-                    other => other.to_string(),
-                })
+    let mut csrf: Option<String> = None;
+    for _ in 0..3 {
+        let mut req = build();
+        if let Some(t) = &csrf {
+            req = req.set("X-CSRF-TOKEN", t);
         }
-        Err(ureq::Error::Status(code, _)) => Err(format!("HTTP {code}")),
-        Err(e) => Err(e.to_string()),
-    }?;
-
-    let ticket = resp
-        .header("RBXAuthenticationTicket")
-        .ok_or_else(|| "ответ без заголовка RBXAuthenticationTicket".to_string())?
-        .to_string();
-    if ticket.is_empty() {
-        return Err("пустой auth ticket".into());
+        match req.call() {
+            Ok(resp) => {
+                let ticket = resp
+                    .header("rbx-authentication-ticket")
+                    .map(|s| s.to_string())
+                    .filter(|s| !s.is_empty());
+                return match ticket {
+                    Some(t) => Ok(t),
+                    None => Err("ответ без заголовка rbx-authentication-ticket".into()),
+                };
+            }
+            Err(ureq::Error::Status(403, r)) => {
+                csrf = r.header("x-csrf-token").map(|s| s.to_string());
+                if csrf.is_none() {
+                    return Err("403 без заголовка x-csrf-token".into());
+                }
+            }
+            Err(ureq::Error::Status(code, _)) => return Err(format!("HTTP {code}")),
+            Err(e) => return Err(e.to_string()),
+        }
     }
-    Ok(ticket)
+    Err("исчерпаны попытки получения auth ticket".into())
 }
 
-/// URL протокола roblox-player: для автологина. gameinfo — base64 auth
-/// ticket; клиент откроется уже залогиненным в нужный аккаунт.
+/// URL протокола roblox-player для автологина: открывает клиент на
+/// домашнем экране уже залогиненным в нужный аккаунт.
+/// Формат: launchmode:app + gameinfo = СЫРОЙ auth ticket (без base64),
+/// как в ic3w0lf22/RAM и DevForum.
 pub fn player_protocol_url(ticket: &str) -> String {
-    let gameinfo = B64.encode(ticket.as_bytes());
     format!(
-        "roblox-player:1+launchtime:{}+gameinfo:{}",
-        chrono::Utc::now().timestamp_millis(),
-        gameinfo
+        "roblox-player:1+launchmode:app+gameinfo:{ticket}+launchtime:{}",
+        chrono::Utc::now().timestamp_millis()
     )
 }
 
