@@ -203,6 +203,8 @@ pub async fn add_account(
         cookie_ok: user.is_some(),
         note: input.note.unwrap_or_default().trim().to_string(),
         created_at: now_ms(),
+        playtime_secs: 0,
+        last_played: None,
         cookie_enc: crypto::encrypt_cookie(&cookie),
     };
 
