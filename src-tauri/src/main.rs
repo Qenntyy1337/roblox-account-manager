@@ -39,6 +39,12 @@ fn main() {
             }
 
             monitor::spawn(app.handle().clone());
+
+            // Перехват имени ROBLOX_singletonEvent при старте менеджера:
+            // пока менеджер жив, ни один клиент Roblox не сможет создать
+            // реальный Event и «сигналить» другим клиентам. Если сейчас
+            // работают клиенты — перехват случится позже, при запуске.
+            let _ = winproc::squat_singleton_event();
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

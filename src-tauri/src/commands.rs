@@ -578,34 +578,35 @@ pub async fn launch_account(
     Ok(LaunchDto { pid, mode: "plain".into() })
 }
 
-/// Синхронное закрытие синглтон-хэндлов ДО запуска нового клиента.
-/// Vanilla Roblox при старте «сигналит» событие ROBLOX_singletonEvent,
-/// и старый клиент закрывается. Если разрушить объект заранее (закрыв
-/// все его хэндлы), новому клиенту некого сигналить — оба продолжат
-/// работать. Это и есть обход одиночного режима (multi-instance).
+/// Обход синглтона ДО запуска нового клиента.
+/// Roblox при старте открывает именованный Event ROBLOX_singletonEvent и
+/// «сигналит» его — старый клиент завершается. Обход (как в проверенных
+/// MultiBloxy / Zgoly-integration):
+///   1) закрываем хэндлы реального Event'а у всех клиентов — объект гибнет;
+///   2) сразу перехватываем имя: создаём у себя Mutant с этим именем.
+/// После перехвата OpenEvent у новых клиентов падает с type mismatch —
+/// сигналить некого, старые клиенты живут. Мьютекс ROBLOX_singletonMutex
+/// не трогаем: старый клиент держит его как маркер и периодически
+/// перепроверяет — потеря мьютекса заставляет его самого выйти.
 async fn close_singletons_pre(app: &AppHandle, username: &str) {
     let app2 = app.clone();
     let username2 = username.to_string();
-    let closed = tauri::async_runtime::spawn_blocking(move || -> usize {
+    let squatted = tauri::async_runtime::spawn_blocking(move || -> bool {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
-        let mut total = 0usize;
-        let mut clear_rounds = 0usize;
-        let mut first_round = true;
+        let mut first_scan = true;
         loop {
-            if std::time::Instant::now() >= deadline {
-                break;
+            // 1) Имя свободно (или уже наше) — перехват удаётся мгновенно
+            if winproc::squat_singleton_event() {
+                return true;
             }
-            let pids = winproc::roblox_pids();
-            if pids.is_empty() {
-                break; // ни одного клиента Roblox — путь свободен
-            }
-            let mut round = 0usize;
-            for pid in pids {
+            // 2) Имя занято реальным Event'ом — закрываем его хэндлы у клиентов
+            for pid in winproc::roblox_pids() {
                 if !winproc::is_alive(pid) {
                     continue;
                 }
                 let scan = winproc::close_singleton_handles(pid);
-                if first_round {
+                if first_scan {
+                    first_scan = false;
                     log_event(
                         &app2,
                         "debug",
@@ -614,84 +615,88 @@ async fn close_singletons_pre(app: &AppHandle, username: &str) {
                     );
                 }
                 if scan.closed > 0 {
-                    round += scan.closed;
                     log_event(
                         &app2,
                         "success",
                         Some(&username2),
-                        &format!("Closed {} Roblox singleton handle(s) (pid {pid})", scan.closed),
+                        &format!(
+                            "Closed {} singleton event handle(s) (pid {pid})",
+                            scan.closed
+                        ),
                     );
                 }
             }
-            first_round = false;
-            total += round;
-            if round == 0 {
-                clear_rounds += 1;
-                if clear_rounds >= 6 {
-                    break; // ~1.8 с подряд чисто — путь свободен
-                }
-            } else {
-                clear_rounds = 0;
+            if std::time::Instant::now() >= deadline {
+                return winproc::squat_singleton_event();
             }
-            std::thread::sleep(std::time::Duration::from_millis(300));
+            std::thread::sleep(std::time::Duration::from_millis(250));
         }
-        total
     })
     .await
-    .unwrap_or(0);
+    .unwrap_or(false);
 
-    if closed > 0 {
+    if squatted {
         log_event(
             app,
-            "success",
+            "info",
             Some(username),
-            &format!("Singleton handles cleared before launch ({closed}) — old clients stay alive"),
+            "Singleton event name squatted — old clients stay alive",
+        );
+    } else {
+        log_event(
+            app,
+            "warning",
+            Some(username),
+            "Could not squat singleton event — old clients may still close",
         );
     }
 }
 
-/// Обход синглтон-хэндла: закрываем ROBLOX_single* во всех клиентах
-/// (фоновый поток на 12 с после каждого запуска — страховка).
+/// Фоновая страховка на 12 с после запуска: если клиент успел создать
+/// реальный Event до перехвата — добиваем его хэндлы и перехватываем имя.
 fn spawn_close_singletons(app: &AppHandle, username: &str) {
     let app2 = app.clone();
     let username2 = username.to_string();
     std::thread::spawn(move || {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
-        let mut closed_any = false;
-        let mut first_round = true;
-        while std::time::Instant::now() < deadline {
+        let mut squatted = winproc::squat_singleton_event();
+        while !squatted && std::time::Instant::now() < deadline {
+            squatted = winproc::squat_singleton_event();
+            if squatted {
+                break;
+            }
             for pid in winproc::roblox_pids() {
                 if !winproc::is_alive(pid) {
                     continue;
                 }
                 let scan = winproc::close_singleton_handles(pid);
-                if first_round {
-                    log_event(
-                        &app2,
-                        "debug",
-                        Some(&username2),
-                        &format!("Singleton sweep pid {pid}: {}", scan_note(&scan)),
-                    );
-                }
                 if scan.closed > 0 {
-                    closed_any = true;
                     log_event(
                         &app2,
                         "success",
                         Some(&username2),
-                        &format!("Closed {} Roblox singleton handle(s) (pid {pid})", scan.closed),
+                        &format!(
+                            "Closed {} singleton event handle(s) (pid {pid})",
+                            scan.closed
+                        ),
                     );
                 }
             }
-            first_round = false;
             std::thread::sleep(std::time::Duration::from_millis(250));
         }
-        if !closed_any {
+        if squatted {
             log_event(
                 &app2,
                 "debug",
                 Some(&username2),
-                "No Roblox singleton handles found (path is clear)",
+                "Singleton event name squatted — old clients stay alive",
+            );
+        } else {
+            log_event(
+                &app2,
+                "debug",
+                Some(&username2),
+                "Singleton event squat did not complete (no handles found)",
             );
         }
     });

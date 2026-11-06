@@ -26,6 +26,7 @@ pub struct SingletonScan {
 #[cfg(windows)]
 mod imp {
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::SingletonScan;
 
@@ -102,6 +103,11 @@ mod imp {
         fn GetWindowTextW(h: HWND, buf: *mut u16, max_count: i32) -> i32;
         fn GetWindowTextLengthW(h: HWND) -> i32;
         fn GetWindowThreadProcessId(h: HWND, pid: *mut DWORD) -> DWORD;
+        fn CreateMutexW(
+            attrs: *mut core::ffi::c_void,
+            initial_owner: BOOL,
+            name: *const u16,
+        ) -> HANDLE;
     }
 
     #[link(name = "ntdll")]
@@ -435,10 +441,13 @@ mod imp {
                 }
                 CloseHandle(dup);
 
-                // ROBLOX_singletonEvent / ROBLOX_singletonMutex и вариации
-                // (в т.ч. переименования без подчёркивания: *Singleton*)
+                // Закрываем ТОЛЬКО ROBLOX_singletonEvent. Мьютекс
+                // ROBLOX_singletonMutex трогать НЕЛЬЗЯ: старый клиент
+                // держит его как маркер «я первый» и периодически
+                // перепроверяет — потеря мьютекса заставляет его
+                // завершиться (это и убивало второй клиент).
                 let lower = obj_name.to_ascii_lowercase();
-                if lower.contains("roblox_single") || lower.contains("singleton") {
+                if lower.contains("singleton") && lower.contains("event") {
                     let ok = DuplicateHandle(
                         target_proc,
                         h_local,
@@ -457,6 +466,39 @@ mod imp {
             CloseHandle(target_proc);
         }
         scan
+    }
+
+    static SQUAT_OK: AtomicBool = AtomicBool::new(false);
+
+    /// Перехват имени ROBLOX_singletonEvent: создаём в СВОЁМ процессе
+    /// Mutant с этим именем и держим хэндл до конца работы приложения.
+    /// После перехвата OpenEvent/CreateEvent Roblox по этому имени всегда
+    /// падает с OBJECT_TYPE_MISMATCH — новому клиенту некого «сигналить»,
+    /// и старые клиенты не закрываются. Ровно так работает проверенный
+    /// обход (MultiBloxy, Zgoly/bloxstrap-multi-instance-integration).
+    /// Возвращает true, если имя занято нашим объектом.
+    pub fn squat_singleton_event() -> bool {
+        if SQUAT_OK.load(Ordering::Relaxed) {
+            return true;
+        }
+        unsafe {
+            let mut name: Vec<u16> = "ROBLOX_singletonEvent"
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+            // Владение не важно: держим открытый хэндл, чтобы имя оставалось
+            // занятым объектом типа Mutant (не Event — для Roblox несовместим)
+            let h = CreateMutexW(std::ptr::null_mut(), FALSE, name.as_mut_ptr());
+            if h != 0 {
+                // Хэндл намеренно не закрываем — живёт вместе с процессом
+                SQUAT_OK.store(true, Ordering::Relaxed);
+                true
+            } else {
+                // Имя занято чужим объектом (реальный Event ещё жив) —
+                // сначала закрываем его хэндлы у клиентов и повторяем
+                false
+            }
+        }
     }
 
     /// Все PID процессов RobloxPlayerBeta.exe (для очистки путей запуска).
@@ -571,6 +613,10 @@ mod imp {
 
     pub fn close_singleton_handles(_pid: u32) -> SingletonScan {
         SingletonScan::default()
+    }
+
+    pub fn squat_singleton_event() -> bool {
+        true
     }
 
     pub fn roblox_pids() -> Vec<u32> {
