@@ -198,11 +198,15 @@ mod imp {
         }
     }
 
-    /// Заголовок первого видимого окна процесса (если есть).
+    /// Заголовок главного видимого окна процесса. У клиента Roblox может быть
+    /// несколько видимых верхнеуровневых окон (главное + служебные), и порядок
+    /// перечисления не гарантирован: в меню главное окно называется «Roblox»,
+    /// в игре — «Название игры - Roblox». Поэтому собираем ВСЕ заголовки и
+    /// берём самый информативный: отличный от «Roblox», если он существует.
     pub fn window_title(pid: u32) -> Option<String> {
         struct Ctx {
             pid: u32,
-            title: String,
+            titles: Vec<String>,
         }
         unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
             let ctx = &mut *(lparam as *mut Ctx);
@@ -218,19 +222,27 @@ mod imp {
             let mut buf = vec![0u16; len as usize + 1];
             let n = GetWindowTextW(hwnd, buf.as_mut_ptr(), len + 1);
             if n > 0 {
-                ctx.title = String::from_utf16_lossy(&buf[..n as usize]);
-                return 0; // стоп
+                ctx.titles.push(String::from_utf16_lossy(&buf[..n as usize]));
             }
             1
         }
-        let mut ctx = Ctx { pid, title: String::new() };
+        let mut ctx = Ctx { pid, titles: Vec::new() };
         unsafe {
             EnumWindows(Some(enum_cb), &mut ctx as *mut Ctx as LPARAM);
         }
-        if ctx.title.is_empty() {
-            None
-        } else {
-            Some(ctx.title)
+        if ctx.titles.is_empty() {
+            return None;
+        }
+        // Самый длинный заголовок, отличный от "roblox" (регистронезависимо)
+        let best = ctx
+            .titles
+            .iter()
+            .filter(|t| !t.trim().eq_ignore_ascii_case("roblox"))
+            .max_by_key(|t| t.chars().count());
+        match best {
+            Some(t) => Some(t.clone()),
+            // Все окна называются "Roblox" — значит, клиент в меню
+            None => Some(ctx.titles[0].clone()),
         }
     }
 

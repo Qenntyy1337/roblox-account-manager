@@ -132,7 +132,7 @@ export function AccountCard({
           {account.cookie_ok ? <ShieldCheck size={12} /> : <ShieldAlert size={12} />}
           {account.cookie_ok ? t("accounts.cookieBadge.ok") : t("accounts.cookieBadge.bad")}
         </span>
-        {inst && (
+        {inst && inst.pid > 0 && (
           <span className="ml-auto font-mono text-[11px] text-faint">PID {inst.pid}</span>
         )}
       </div>

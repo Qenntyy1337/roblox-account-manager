@@ -108,6 +108,103 @@ fn tick(app: &tauri::AppHandle) {
     let mut changed = false;
     let mut snapshot = Vec::new();
 
+    /* --- Автологин-треки (pid == 0): глобальное назначение процессов ---
+       Раньше каждый трек брал «самый свежий» процесс — при запуске двух
+       аккаунтов подряд они могли обменяться клиентами. Теперь назначаем
+       всем трекам за один проход: кто запустился раньше, тот получает
+       процесс, родившийся раньше. */
+    {
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut launching: Vec<(String, Track)> = {
+            let map = state.instances.lock().unwrap_or_else(|e| e.into_inner());
+            map.iter()
+                .filter(|(_, t)| t.pid == 0)
+                .map(|(k, t)| (k.clone(), t.clone()))
+                .collect()
+        };
+        launching.sort_by_key(|(_, t)| t.started_at);
+
+        if !launching.is_empty() {
+            let tracked: HashSet<u32> = {
+                let map = state.instances.lock().unwrap_or_else(|e| e.into_inner());
+                map.values().map(|x| x.pid).filter(|p| *p != 0).collect()
+            };
+            let mut candidates: Vec<(u32, i64)> = winproc::roblox_pids()
+                .into_iter()
+                .filter(|p| !tracked.contains(p))
+                .filter_map(|p| winproc::process_start_time(p).map(|st| (p, st)))
+                .collect();
+            candidates.sort_by_key(|&(_, st)| st);
+
+            let mut map = state.instances.lock().unwrap_or_else(|e| e.into_inner());
+            let mut taken: HashSet<u32> = HashSet::new();
+            for (id, t) in launching {
+                let pick = candidates
+                    .iter()
+                    .copied()
+                    .find(|(p, st)| !taken.contains(p) && *st >= t.started_at - 1500);
+                match pick {
+                    Some((new_pid, _)) => {
+                        taken.insert(new_pid);
+                        let username = account_name(&state, &id);
+                        map.insert(
+                            id.clone(),
+                            Track {
+                                pid: new_pid,
+                                status: "launching".into(),
+                                started_at: t.started_at,
+                                last_title: None,
+                                mode: t.mode.clone(),
+                                acc_secs: t.acc_secs,
+                                last_tick_ms: now,
+                                ticks: 0,
+                            },
+                        );
+                        changed = true;
+                        log_event(
+                            app,
+                            "success",
+                            username.as_deref(),
+                            &format!("Client attached after autologin (pid {new_pid})"),
+                        );
+                    }
+                    None => {
+                        if now - t.started_at > 90_000 {
+                            let username = account_name(&state, &id);
+                            map.remove(&id);
+                            changed = true;
+                            log_event(
+                                app,
+                                "error",
+                                username.as_deref(),
+                                "Autologin client did not start within 90 s — giving up",
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Пока клиент не найден — показываем трек как «Запуск» в UI
+            let pending: Vec<(String, Track)> = map
+                .iter()
+                .filter(|(_, t)| t.pid == 0)
+                .map(|(k, t)| (k.clone(), t.clone()))
+                .collect();
+            for (id, t) in pending {
+                changed = true;
+                snapshot.push(InstanceDto {
+                    account_id: id,
+                    pid: 0,
+                    status: "launching".into(),
+                    started_at: t.started_at,
+                    title: None,
+                    mode: Some(t.mode),
+                    playtime_secs: saved_playtime.get(&id).copied().unwrap_or(0),
+                });
+            }
+        }
+    }
+
     for id in ids {
         let track = {
             let map = state.instances.lock().unwrap_or_else(|e| e.into_inner());
@@ -116,60 +213,8 @@ fn tick(app: &tauri::AppHandle) {
         let Some(mut t) = track else { continue };
         let now = chrono::Utc::now().timestamp_millis();
 
-        // pid == 0 — автологин через протокол: клиент ещё не появился,
-        // ищем свежий процесс Roblox, стартовавший после запуска.
+        // pid == 0 — автологин-трек уже обработан глобальной фазой выше
         if t.pid == 0 {
-            if now - t.started_at > 90_000 {
-                let username = account_name(&state, &id);
-                log_event(
-                    app,
-                    "error",
-                    username.as_deref(),
-                    "Autologin client did not start within 90 s — giving up",
-                );
-                {
-                    let mut map = state.instances.lock().unwrap_or_else(|e| e.into_inner());
-                    map.remove(&id);
-                }
-                changed = true;
-                continue;
-            }
-            let tracked: HashSet<u32> = {
-                let map = state.instances.lock().unwrap_or_else(|e| e.into_inner());
-                map.values().map(|x| x.pid).filter(|p| *p != 0).collect()
-            };
-            let candidate = winproc::roblox_pids()
-                .into_iter()
-                .filter(|p| !tracked.contains(p))
-                .filter_map(|p| winproc::process_start_time(p).map(|st| (p, st)))
-                .filter(|(_p, st)| *st >= t.started_at - 1500)
-                .max_by_key(|(_p, st)| *st);
-            if let Some((new_pid, _)) = candidate {
-                let username = account_name(&state, &id);
-                {
-                    let mut map = state.instances.lock().unwrap_or_else(|e| e.into_inner());
-                    map.insert(
-                        id.clone(),
-                        Track {
-                            pid: new_pid,
-                            status: "launching".into(),
-                            started_at: t.started_at,
-                            last_title: None,
-                            mode: t.mode.clone(),
-                            acc_secs: t.acc_secs,
-                            last_tick_ms: now,
-                            ticks: 0,
-                        },
-                    );
-                }
-                changed = true;
-                log_event(
-                    app,
-                    "success",
-                    username.as_deref(),
-                    &format!("Client attached after autologin (pid {new_pid})"),
-                );
-            }
             continue;
         }
 
@@ -185,6 +230,13 @@ fn tick(app: &tauri::AppHandle) {
                 let untracked: Vec<u32> = winproc::roblox_pids()
                     .into_iter()
                     .filter(|p| !tracked.contains(p) && *p != t.pid)
+                    // только СВЕЖИЕ процессы: клиент перезапустил сам себя,
+                    // чтобы не прихватить чужой давно работающий клиент
+                    .filter(|p| {
+                        winproc::process_start_time(p)
+                            .map(|st| now - st < 15_000)
+                            .unwrap_or(false)
+                    })
                     .collect();
                 if untracked.len() == 1 {
                     let new_pid = untracked[0];
@@ -302,12 +354,14 @@ fn tick(app: &tauri::AppHandle) {
         }
 
         // Клиент жив: статус по заголовку окна.
+        // window_title возвращает самый информативный заголовок видимого окна:
+        // в меню это просто "Roblox", в игре — название игры (обычно
+        // в формате "Игра - Roblox"). Если все окна — "Roblox", значит меню.
         let raw_title = winproc::window_title(t.pid);
         let status = match &raw_title {
             Some(s)
-                if !s.is_empty()
-                    && s != "Roblox"
-                    && s.to_ascii_lowercase().contains("roblox") =>
+                if !s.trim().is_empty()
+                    && !s.trim().eq_ignore_ascii_case("roblox") =>
             {
                 "ingame"
             }
