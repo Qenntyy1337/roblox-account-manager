@@ -1,0 +1,126 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ------------------------------------------------------------------ */
+/* Дизайн-токены (тройка каналов для rgb(var(--x) / alpha))            */
+/* ------------------------------------------------------------------ */
+
+:root {
+  --c-bg: 8 9 14;
+  --c-panel: 13 15 23;
+  --c-surface: 18 20 30;
+  --c-raise: 25 28 40;
+  --c-line: 42 46 63;
+  --c-ink: 233 236 245;
+  --c-mut: 145 152 173;
+  --c-faint: 100 106 128;
+
+  --c-ok: 52 211 153;
+  --c-warn: 251 191 36;
+  --c-err: 248 113 113;
+  --c-dbg: 125 135 160;
+  --c-info: 96 165 250;
+
+  --accent-rgb: 139 92 246;
+  --accent-hex: #8b5cf6;
+  --accent-ink: #ffffff;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  /* Полупрозрачный фон: в Windows под ним виден Acrylic/Mica-эффект */
+  background: rgb(var(--c-bg) / 0.86);
+  color: rgb(var(--c-ink));
+  font-family: InterVariable, Inter, "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow: hidden;
+  user-select: none;
+  cursor: default;
+}
+
+input,
+textarea {
+  user-select: text;
+}
+
+::selection {
+  background: rgb(var(--accent-rgb) / 0.35);
+}
+
+/* ------------------------------------------------------------------ */
+/* Слайдеры                                                            */
+/* ------------------------------------------------------------------ */
+
+.ram-slider {
+  outline: none;
+}
+
+.ram-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 9999px;
+  background: #ffffff;
+  border: none;
+  box-shadow: 0 1px 5px rgb(0 0 0 / 0.45);
+  transition: transform 0.12s ease;
+}
+
+.ram-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.18);
+}
+
+.ram-slider::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 9999px;
+  background: #ffffff;
+  border: none;
+  box-shadow: 0 1px 5px rgb(0 0 0 / 0.45);
+}
+
+/* ------------------------------------------------------------------ */
+/* Скроллбары                                                          */
+/* ------------------------------------------------------------------ */
+
+.ram-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(255 255 255 / 0.14) transparent;
+}
+
+.ram-scroll::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.ram-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.ram-scroll::-webkit-scrollbar-thumb {
+  background: rgb(255 255 255 / 0.13);
+  border-radius: 9999px;
+  border: 2.5px solid transparent;
+  background-clip: padding-box;
+}
+
+.ram-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--accent-rgb) / 0.45);
+  border: 2.5px solid transparent;
+  background-clip: padding-box;
+}
+
+/* Модальные поля без overflow-обрезки для focus ring */
+input:focus-visible,
+button:focus-visible {
+  outline: none;
+}
