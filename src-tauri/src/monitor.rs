@@ -233,7 +233,7 @@ fn tick(app: &tauri::AppHandle) {
                     // только СВЕЖИЕ процессы: клиент перезапустил сам себя,
                     // чтобы не прихватить чужой давно работающий клиент
                     .filter(|p| {
-                        winproc::process_start_time(p)
+                        winproc::process_start_time(*p)
                             .map(|st| now - st < 15_000)
                             .unwrap_or(false)
                     })
