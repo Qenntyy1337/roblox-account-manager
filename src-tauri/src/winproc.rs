@@ -338,14 +338,14 @@ mod imp {
                 if ok_status == STATUS_INFO_LENGTH_MISMATCH {
                     size *= 2;
                     if size > (1 << 27) {
-                        return 0;
+                        return scan;
                     }
                     continue;
                 }
-                return 0;
+                return scan;
             }
             if buf.len() < 16 {
-                return 0;
+                return scan;
             }
             let count = usize::from_le_bytes([buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]]);
             let entry_size = std::mem::size_of::<HandleEntryEx>();
