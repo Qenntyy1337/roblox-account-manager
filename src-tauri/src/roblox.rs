@@ -161,11 +161,14 @@ pub fn auth_ticket(cookie: &str) -> Result<String, String> {
     const URL: &str = "https://auth.roblox.com/v1/authentication-ticket/";
     const REFERER: &str = "https://www.roblox.com/games/4924922222/Brookhaven-RP";
 
+    // Roblox требует JSON-тело с Content-Type: application/json —
+    // пустой POST даёт 415 Unsupported Media Type. Достаточно "{}".
     let build = || {
         agent()
             .post(URL)
             .set("Cookie", &hdr)
             .set("Referer", REFERER)
+            .set("Content-Type", "application/json")
             .set("Accept", "application/json")
     };
 
@@ -175,7 +178,7 @@ pub fn auth_ticket(cookie: &str) -> Result<String, String> {
         if let Some(t) = &csrf {
             req = req.set("X-CSRF-TOKEN", t);
         }
-        match req.call() {
+        match req.send_string("{}") {
             Ok(resp) => {
                 let ticket = resp
                     .header("rbx-authentication-ticket")
@@ -192,7 +195,12 @@ pub fn auth_ticket(cookie: &str) -> Result<String, String> {
                     return Err("403 без заголовка x-csrf-token".into());
                 }
             }
-            Err(ureq::Error::Status(code, _)) => return Err(format!("HTTP {code}")),
+            Err(ureq::Error::Status(code, r)) => {
+                // добавляем тело ответа в ошибку — для диагностики в логе
+                let body = r.into_string().unwrap_or_default();
+                let snippet: String = body.chars().take(200).collect();
+                return Err(format!("HTTP {code}: {snippet}"));
+            }
             Err(e) => return Err(e.to_string()),
         }
     }
